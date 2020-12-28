@@ -832,15 +832,19 @@ func (v *reassignVisitor) visit(n *Node) *Node {
 		return nil
 	}
 	switch n.Op {
-	case OAS:
+	case OAS, OSELRECV:
 		if n.Left == v.name && n != v.name.Name.Defn {
 			return n
 		}
-	case OAS2, OAS2FUNC, OAS2MAPR, OAS2DOTTYPE:
+	case OAS2, OAS2FUNC, OAS2MAPR, OAS2DOTTYPE, OAS2RECV:
 		for _, p := range n.List.Slice() {
 			if p == v.name && n != v.name.Name.Defn {
 				return n
 			}
+		}
+	case OSELRECV2:
+		if (n.Left == v.name || n.List.First() == v.name) && n != v.name.Name.Defn {
+			return n
 		}
 	}
 	if a := v.visit(n.Left); a != nil {
@@ -962,6 +966,21 @@ func mkinlcall(n, fn *Node, maxCost int32, inlMap map[*Node]bool) *Node {
 	}
 
 	ninit := n.Ninit
+
+	// For normal function calls, the function callee expression
+	// may contain side effects (e.g., added by addinit during
+	// inlconv2expr or inlconv2list). Make sure to preserve these,
+	// if necessary (#42703).
+	if n.Op == OCALLFUNC {
+		callee := n.Left
+		for callee.Op == OCONVNOP {
+			ninit.AppendNodes(&callee.Ninit)
+			callee = callee.Left
+		}
+		if callee.Op != ONAME && callee.Op != OCLOSURE {
+			Fatalf("unexpected callee expression: %v", callee)
+		}
+	}
 
 	// Make temp names to use instead of the originals.
 	inlvars := make(map[*Node]*Node)

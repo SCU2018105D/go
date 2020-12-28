@@ -15,7 +15,7 @@ import (
 var SkipDir = errors.New("skip this directory")
 
 // WalkDirFunc is the type of the function called by WalkDir to visit
-// each each file or directory.
+// each file or directory.
 //
 // The path argument contains the argument to Walk as a prefix.
 // That is, if Walk is called with root argument "dir" and finds a file
@@ -64,7 +64,7 @@ var SkipDir = errors.New("skip this directory")
 //   - If a directory read fails, the function is called a second time
 //     for that directory to report the error.
 //
-type WalkDirFunc func(path string, entry DirEntry, err error) error
+type WalkDirFunc func(path string, d DirEntry, err error) error
 
 // walkDir recursively descends path, calling walkDirFn.
 func walkDir(fsys FS, name string, d DirEntry, walkDirFn WalkDirFunc) error {
