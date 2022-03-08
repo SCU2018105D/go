@@ -6,7 +6,6 @@ package noder
 
 import (
 	"fmt"
-	"os"
 
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/dwarfgen"
@@ -44,7 +43,6 @@ func checkFiles(noders []*noder) (posMap, *types2.Package, *types2.Info) {
 		GoVersion:             base.Flag.Lang,
 		IgnoreLabels:          true, // parser already checked via syntax.CheckBranches mode
 		CompilerErrorMessages: true, // use error strings matching existing compiler errors
-		AllowTypeLists:        true, // remove this line once all tests use type set syntax
 		Error: func(err error) {
 			terr := err.(types2.Error)
 			base.ErrorfAt(m.makeXPos(terr.Pos), "%s", terr.Msg)
@@ -78,10 +76,6 @@ func checkFiles(noders []*noder) (posMap, *types2.Package, *types2.Info) {
 func check2(noders []*noder) {
 	m, pkg, info := checkFiles(noders)
 
-	if base.Flag.G < 2 {
-		os.Exit(0)
-	}
-
 	g := irgen{
 		target: typecheck.Target,
 		self:   pkg,
@@ -91,10 +85,17 @@ func check2(noders []*noder) {
 		typs:   make(map[types2.Type]*types.Type),
 	}
 	g.generate(noders)
+}
 
-	if base.Flag.G < 3 {
-		os.Exit(0)
-	}
+// Information about sub-dictionary entries in a dictionary
+type subDictInfo struct {
+	// Call or XDOT node that requires a dictionary.
+	callNode ir.Node
+	// Saved CallExpr.X node (*ir.SelectorExpr or *InstExpr node) for a generic
+	// method or function call, since this node will get dropped when the generic
+	// method/function call is transformed to a call on the instantiated shape
+	// function. Nil for other kinds of calls or XDOTs.
+	savedXNode ir.Node
 }
 
 // dictInfo is the dictionary format for an instantiation of a generic function with
@@ -109,13 +110,13 @@ type dictInfo struct {
 	// Nodes in the instantiation that requires a subdictionary. Includes
 	// method and function calls (OCALL), function values (OFUNCINST), method
 	// values/expressions (OXDOT).
-	subDictCalls []ir.Node
+	subDictCalls []subDictInfo
 	// Nodes in the instantiation that are a conversion from a typeparam/derived
 	// type to a specific interface.
 	itabConvs []ir.Node
 
 	// Mapping from each shape type that substitutes a type param, to its
-	// type bound (which is also substitued with shapes if it is parameterized)
+	// type bound (which is also substituted with shapes if it is parameterized)
 	shapeToBound map[*types.Type]*types.Type
 
 	// For type switches on nonempty interfaces, a map from OTYPE entries of
@@ -148,6 +149,9 @@ type irgen struct {
 	// laterFuncs records tasks that need to run after all declarations
 	// are processed.
 	laterFuncs []func()
+	// haveEmbed indicates whether the current node belongs to file that
+	// imports "embed" package.
+	haveEmbed bool
 
 	// exprStmtOK indicates whether it's safe to generate expressions or
 	// statements yet.
@@ -155,16 +159,6 @@ type irgen struct {
 
 	// types which we need to finish, by doing g.fillinMethods.
 	typesToFinalize []*typeDelayInfo
-
-	dnum int // for generating unique dictionary variables
-
-	// Map from a name of function that been instantiated to information about
-	// its instantiated function (including dictionary format).
-	instInfoMap map[*types.Sym]*instInfo
-
-	// dictionary syms which we need to finish, by writing out any itabconv
-	// entries.
-	dictSymsToFinalize []*delayInfo
 
 	// True when we are compiling a top-level generic function or method. Use to
 	// avoid adding closures of generic functions/methods to the target.Decls
@@ -176,6 +170,23 @@ type irgen struct {
 	// can be sure they match up correctly between types2-to-types1 translation
 	// and types1 importing.
 	curDecl string
+}
+
+// genInst has the information for creating needed instantiations and modifying
+// functions to use instantiations.
+type genInst struct {
+	dnum int // for generating unique dictionary variables
+
+	// Map from the names of all instantiations to information about the
+	// instantiations.
+	instInfoMap map[*types.Sym]*instInfo
+
+	// Dictionary syms which we need to finish, by writing out any itabconv
+	// entries.
+	dictSymsToFinalize []*delayInfo
+
+	// New instantiations created during this round of buildInstantiations().
+	newInsts []ir.Node
 }
 
 func (g *irgen) later(fn func()) {
@@ -255,8 +266,11 @@ Outer:
 	types.ResumeCheckSize()
 
 	// 3. Process all remaining declarations.
-	for _, declList := range declLists {
+	for i, declList := range declLists {
+		old := g.haveEmbed
+		g.haveEmbed = noders[i].importedEmbed
 		g.decls((*ir.Nodes)(&g.target.Decls), declList)
+		g.haveEmbed = old
 	}
 	g.exprStmtOK = true
 
@@ -303,8 +317,9 @@ Outer:
 
 	typecheck.DeclareUniverse()
 
-	// Create any needed stencils of generic functions
-	g.stencil()
+	// Create any needed instantiations of generic functions and transform
+	// existing and new functions to use those instantiations.
+	BuildInstantiations()
 
 	// Remove all generic functions from g.target.Decl, since they have been
 	// used for stenciling, but don't compile. Generic functions will already

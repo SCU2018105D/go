@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"internal/godebug"
 	"io"
 	"io/ioutil"
 	"math/bits"
@@ -136,21 +137,20 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 
 	// Ensure that any crash we find is written to the corpus, even if an error
 	// or interruption occurs while minimizing it.
-	var crashMinimizing *fuzzResult
 	crashWritten := false
 	defer func() {
-		if crashMinimizing == nil || crashWritten {
+		if c.crashMinimizing == nil || crashWritten {
 			return
 		}
-		fileName, werr := writeToCorpus(crashMinimizing.entry.Data, opts.CorpusDir)
+		werr := writeToCorpus(&c.crashMinimizing.entry, opts.CorpusDir)
 		if werr != nil {
 			err = fmt.Errorf("%w\n%v", err, werr)
 			return
 		}
 		if err == nil {
 			err = &crashError{
-				name: filepath.Base(fileName),
-				err:  errors.New(crashMinimizing.crasherMsg),
+				path: c.crashMinimizing.entry.Path,
+				err:  errors.New(c.crashMinimizing.crasherMsg),
 			}
 		}
 	}()
@@ -198,7 +198,7 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 	for {
 		var inputC chan fuzzInput
 		input, ok := c.peekInput()
-		if ok && crashMinimizing == nil && !stopping {
+		if ok && c.crashMinimizing == nil && !stopping {
 			inputC = c.inputC
 		}
 
@@ -231,12 +231,13 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 
 			if result.crasherMsg != "" {
 				if c.warmupRun() && result.entry.IsSeed {
-					fmt.Fprintf(c.opts.Log, "found a crash while testing seed corpus entry: %q\n", result.entry.Parent)
+					target := filepath.Base(c.opts.CorpusDir)
+					fmt.Fprintf(c.opts.Log, "failure while testing seed corpus entry: %s/%s\n", target, testName(result.entry.Parent))
 					stop(errors.New(result.crasherMsg))
 					break
 				}
 				if c.canMinimize() && result.canMinimize {
-					if crashMinimizing != nil {
+					if c.crashMinimizing != nil {
 						// This crash is not minimized, and another crash is being minimized.
 						// Ignore this one and wait for the other one to finish.
 						break
@@ -244,17 +245,17 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 					// Found a crasher but haven't yet attempted to minimize it.
 					// Send it back to a worker for minimization. Disable inputC so
 					// other workers don't continue fuzzing.
-					crashMinimizing = &result
-					fmt.Fprintf(c.opts.Log, "fuzz: minimizing %d-byte crash input...\n", len(result.entry.Data))
+					c.crashMinimizing = &result
+					fmt.Fprintf(c.opts.Log, "fuzz: minimizing %d-byte failing input file\n", len(result.entry.Data))
 					c.queueForMinimization(result, nil)
 				} else if !crashWritten {
 					// Found a crasher that's either minimized or not minimizable.
 					// Write to corpus and stop.
-					fileName, err := writeToCorpus(result.entry.Data, opts.CorpusDir)
+					err := writeToCorpus(&result.entry, opts.CorpusDir)
 					if err == nil {
 						crashWritten = true
 						err = &crashError{
-							name: filepath.Base(fileName),
+							path: result.entry.Path,
 							err:  errors.New(result.crasherMsg),
 						}
 					}
@@ -263,7 +264,7 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 							c.opts.Log,
 							"DEBUG new crasher, elapsed: %s, id: %s, parent: %s, gen: %d, size: %d, exec time: %s\n",
 							c.elapsed(),
-							fileName,
+							result.entry.Path,
 							result.entry.Parent,
 							result.entry.Generation,
 							len(result.entry.Data),
@@ -308,23 +309,22 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 					// number of new edges that this result expanded.
 					// TODO(jayconrod, katiehockman): Don't write a value that's already
 					// in the corpus.
-					if c.canMinimize() && result.canMinimize && crashMinimizing == nil {
+					if c.canMinimize() && result.canMinimize && c.crashMinimizing == nil {
 						// Send back to workers to find a smaller value that preserves
 						// at least one new coverage bit.
 						c.queueForMinimization(result, keepCoverage)
 					} else {
 						// Update the coordinator's coverage mask and save the value.
 						inputSize := len(result.entry.Data)
-						if opts.CacheDir != "" {
-							filename, err := writeToCorpus(result.entry.Data, opts.CacheDir)
-							if err != nil {
-								stop(err)
-							}
-							result.entry.Data = nil
-							result.entry.Name = filename
+						entryNew, err := c.addCorpusEntries(true, result.entry)
+						if err != nil {
+							stop(err)
+							break
+						}
+						if !entryNew {
+							continue
 						}
 						c.updateCoverage(keepCoverage)
-						c.corpus.entries = append(c.corpus.entries, result.entry)
 						c.inputQueue.enqueue(result.entry)
 						c.interestingCount++
 						if shouldPrintDebugInfo() {
@@ -332,7 +332,7 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 								c.opts.Log,
 								"DEBUG new interesting input, elapsed: %s, id: %s, parent: %s, gen: %d, new bits: %d, total bits: %d, size: %d, exec time: %s\n",
 								c.elapsed(),
-								result.entry.Name,
+								result.entry.Path,
 								result.entry.Parent,
 								result.entry.Generation,
 								countBits(keepCoverage),
@@ -348,7 +348,7 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 							c.opts.Log,
 							"DEBUG worker reported interesting input that doesn't expand coverage, elapsed: %s, id: %s, parent: %s, canMinimize: %t\n",
 							c.elapsed(),
-							result.entry.Name,
+							result.entry.Path,
 							result.entry.Parent,
 							result.canMinimize,
 						)
@@ -398,7 +398,7 @@ func CoordinateFuzzing(ctx context.Context, opts CoordinateFuzzingOpts) (err err
 // of the file where the input causing the crasher was saved. The testing
 // framework uses this to report a command to re-run that specific input.
 type crashError struct {
-	name string
+	path string
 	err  error
 }
 
@@ -410,12 +410,44 @@ func (e *crashError) Unwrap() error {
 	return e.err
 }
 
-func (e *crashError) CrashName() string {
-	return e.name
+func (e *crashError) CrashPath() string {
+	return e.path
 }
 
 type corpus struct {
 	entries []CorpusEntry
+	hashes  map[[sha256.Size]byte]bool
+}
+
+// addCorpusEntries adds entries to the corpus, and optionally writes the entries
+// to the cache directory. If an entry is already in the corpus it is skipped. If
+// all of the entries are unique, addCorpusEntries returns true and a nil error,
+// if at least one of the entries was a duplicate, it returns false and a nil error.
+func (c *coordinator) addCorpusEntries(addToCache bool, entries ...CorpusEntry) (bool, error) {
+	noDupes := true
+	for _, e := range entries {
+		data, err := corpusEntryData(e)
+		if err != nil {
+			return false, err
+		}
+		h := sha256.Sum256(data)
+		if c.corpus.hashes[h] {
+			noDupes = false
+			continue
+		}
+		if addToCache {
+			if err := writeToCorpus(&e, c.opts.CacheDir); err != nil {
+				return false, err
+			}
+			// For entries written to disk, we don't hold onto the bytes,
+			// since the corpus would consume a significant amount of
+			// memory.
+			e.Data = nil
+		}
+		c.corpus.hashes[h] = true
+		c.corpus.entries = append(c.corpus.entries, e)
+	}
+	return noDupes, nil
 }
 
 // CorpusEntry represents an individual input for fuzzing.
@@ -427,18 +459,18 @@ type corpus struct {
 type CorpusEntry = struct {
 	Parent string
 
-	// Name is the name of the corpus file, if the entry was loaded from the
-	// seed corpus. It can be used with -run. For entries added with f.Add and
-	// entries generated by the mutator, Name is empty and Data is populated.
-	Name string
+	// Path is the path of the corpus file, if the entry was loaded from disk.
+	// For other entries, including seed values provided by f.Add, Path is the
+	// name of the test, e.g. seed#0 or its hash.
+	Path string
 
-	// Data is the raw input data. Data should only be populated for initial
-	// seed values added with f.Add. For on-disk corpus files, Data will
-	// be nil.
+	// Data is the raw input data. Data should only be populated for seed
+	// values. For on-disk corpus files, Data will be nil, as it will be loaded
+	// from disk using Path.
 	Data []byte
 
 	// Values is the unmarshaled values from a corpus file.
-	Values []interface{}
+	Values []any
 
 	Generation int
 
@@ -446,14 +478,14 @@ type CorpusEntry = struct {
 	IsSeed bool
 }
 
-// Data returns the raw input bytes, either from the data struct field,
-// or from disk.
-func CorpusEntryData(ce CorpusEntry) ([]byte, error) {
+// corpusEntryData returns the raw input bytes, either from the data struct
+// field, or from disk.
+func corpusEntryData(ce CorpusEntry) ([]byte, error) {
 	if ce.Data != nil {
 		return ce.Data, nil
 	}
 
-	return os.ReadFile(ce.Name)
+	return os.ReadFile(ce.Path)
 }
 
 type fuzzInput struct {
@@ -565,7 +597,7 @@ type coordinator struct {
 
 	// interestingCount is the number of unique interesting values which have
 	// been found this execution.
-	interestingCount int64
+	interestingCount int
 
 	// warmupInputCount is the count of all entries in the corpus which will
 	// need to be received from workers to run once during warmup, but not fuzz.
@@ -604,6 +636,9 @@ type coordinator struct {
 	// same thing.
 	minimizeQueue queue
 
+	// crashMinimizing is the crash that is currently being minimized.
+	crashMinimizing *fuzzResult
+
 	// coverageMask aggregates coverage that was found for all inputs in the
 	// corpus. Each byte represents a single basic execution block. Each set bit
 	// within the byte indicates that an input has triggered that block at least
@@ -614,15 +649,11 @@ type coordinator struct {
 }
 
 func newCoordinator(opts CoordinateFuzzingOpts) (*coordinator, error) {
-	// Make sure all of the seed corpus given by f.Add has marshalled data.
+	// Make sure all of the seed corpus has marshalled data.
 	for i := range opts.Seed {
 		if opts.Seed[i].Data == nil && opts.Seed[i].Values != nil {
 			opts.Seed[i].Data = marshalCorpusFile(opts.Seed[i].Values...)
 		}
-	}
-	corpus, err := readCache(opts.Seed, opts.Types, opts.CacheDir)
-	if err != nil {
-		return nil, err
 	}
 	c := &coordinator{
 		opts:        opts,
@@ -630,8 +661,11 @@ func newCoordinator(opts CoordinateFuzzingOpts) (*coordinator, error) {
 		inputC:      make(chan fuzzInput),
 		minimizeC:   make(chan fuzzMinimizeInput),
 		resultC:     make(chan fuzzResult),
-		corpus:      corpus,
 		timeLastLog: time.Now(),
+		corpus:      corpus{hashes: make(map[[sha256.Size]byte]bool)},
+	}
+	if err := c.readCache(); err != nil {
+		return nil, err
 	}
 	if opts.MinimizeLimit > 0 || opts.MinimizeTimeout > 0 {
 		for _, t := range opts.Types {
@@ -664,14 +698,14 @@ func newCoordinator(opts CoordinateFuzzingOpts) (*coordinator, error) {
 
 	if len(c.corpus.entries) == 0 {
 		fmt.Fprintf(c.opts.Log, "warning: starting with empty corpus\n")
-		var vals []interface{}
+		var vals []any
 		for _, t := range opts.Types {
 			vals = append(vals, zeroValue(t))
 		}
 		data := marshalCorpusFile(vals...)
 		h := sha256.Sum256(data)
 		name := fmt.Sprintf("%x", h[:4])
-		c.corpus.entries = append(c.corpus.entries, CorpusEntry{Name: name, Data: data})
+		c.addCorpusEntries(false, CorpusEntry{Path: name, Data: data})
 	}
 
 	return c, nil
@@ -692,13 +726,15 @@ func (c *coordinator) logStats() {
 		} else {
 			fmt.Fprintf(c.opts.Log, "fuzz: elapsed: %s, testing seed corpus: %d/%d completed\n", c.elapsed(), runSoFar, c.warmupInputCount)
 		}
+	} else if c.crashMinimizing != nil {
+		fmt.Fprintf(c.opts.Log, "fuzz: elapsed: %s, minimizing\n", c.elapsed())
 	} else {
 		rate := float64(c.count-c.countLastLog) / now.Sub(c.timeLastLog).Seconds()
 		if coverageEnabled {
-			interestingTotalCount := int64(c.warmupInputCount-len(c.opts.Seed)) + c.interestingCount
-			fmt.Fprintf(c.opts.Log, "fuzz: elapsed: %s, execs: %d (%.0f/sec), new interesting: %d (total: %d)\n", c.elapsed(), c.count, rate, c.interestingCount, interestingTotalCount)
+			total := c.warmupInputCount + c.interestingCount
+			fmt.Fprintf(c.opts.Log, "fuzz: elapsed: %s, execs: %d (%.0f/sec), new interesting: %d (total: %d)\n", c.elapsed(), c.count, rate, c.interestingCount, total)
 		} else {
-			fmt.Fprintf(c.opts.Log, "fuzz: elapsed: %s, execs: %d (%.0f/sec)", c.elapsed(), c.count, rate)
+			fmt.Fprintf(c.opts.Log, "fuzz: elapsed: %s, execs: %d (%.0f/sec)\n", c.elapsed(), c.count, rate)
 		}
 	}
 	c.countLastLog = c.count
@@ -821,9 +857,11 @@ func (c *coordinator) peekMinimizeInput() (fuzzMinimizeInput, bool) {
 			}
 		}
 	}
-	remaining := c.opts.Limit - c.count - c.countWaiting
-	if input.limit > remaining {
-		input.limit = remaining
+	if c.opts.Limit > 0 {
+		remaining := c.opts.Limit - c.count - c.countWaiting
+		if input.limit > remaining {
+			input.limit = remaining
+		}
 	}
 	return input, true
 }
@@ -869,12 +907,10 @@ func (c *coordinator) updateCoverage(newCoverage []byte) int {
 }
 
 // canMinimize returns whether the coordinator should attempt to find smaller
-// inputs that reproduce a crash or new coverage. It shouldn't do this if it
-// is in the warmup phase.
+// inputs that reproduce a crash or new coverage.
 func (c *coordinator) canMinimize() bool {
 	return c.minimizationAllowed &&
-		(c.opts.Limit == 0 || c.count+c.countWaiting < c.opts.Limit) &&
-		!c.warmupRun()
+		(c.opts.Limit == 0 || c.count+c.countWaiting < c.opts.Limit)
 }
 
 func (c *coordinator) elapsed() time.Duration {
@@ -886,22 +922,25 @@ func (c *coordinator) elapsed() time.Duration {
 //
 // TODO(fuzzing): need a mechanism that can remove values that
 // aren't useful anymore, for example, because they have the wrong type.
-func readCache(seed []CorpusEntry, types []reflect.Type, cacheDir string) (corpus, error) {
-	var c corpus
-	c.entries = append(c.entries, seed...)
-	entries, err := ReadCorpus(cacheDir, types)
+func (c *coordinator) readCache() error {
+	if _, err := c.addCorpusEntries(false, c.opts.Seed...); err != nil {
+		return err
+	}
+	entries, err := ReadCorpus(c.opts.CacheDir, c.opts.Types)
 	if err != nil {
 		if _, ok := err.(*MalformedCorpusError); !ok {
 			// It's okay if some files in the cache directory are malformed and
 			// are not included in the corpus, but fail if it's an I/O error.
-			return corpus{}, err
+			return err
 		}
 		// TODO(jayconrod,katiehockman): consider printing some kind of warning
 		// indicating the number of files which were skipped because they are
 		// malformed.
 	}
-	c.entries = append(c.entries, entries...)
-	return c, nil
+	if _, err := c.addCorpusEntries(false, entries...); err != nil {
+		return err
+	}
+	return nil
 }
 
 // MalformedCorpusError is an error found while reading the corpus from the
@@ -946,13 +985,13 @@ func ReadCorpus(dir string, types []reflect.Type) ([]CorpusEntry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read corpus file: %v", err)
 		}
-		var vals []interface{}
+		var vals []any
 		vals, err = readCorpusData(data, types)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%q: %v", filename, err))
 			continue
 		}
-		corpus = append(corpus, CorpusEntry{Name: filename, Values: vals})
+		corpus = append(corpus, CorpusEntry{Path: filename, Values: vals})
 	}
 	if len(errs) > 0 {
 		return corpus, &MalformedCorpusError{errs: errs}
@@ -960,7 +999,7 @@ func ReadCorpus(dir string, types []reflect.Type) ([]CorpusEntry, error) {
 	return corpus, nil
 }
 
-func readCorpusData(data []byte, types []reflect.Type) ([]interface{}, error) {
+func readCorpusData(data []byte, types []reflect.Type) ([]any, error) {
 	vals, err := unmarshalCorpusFile(data)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal: %v", err)
@@ -973,36 +1012,44 @@ func readCorpusData(data []byte, types []reflect.Type) ([]interface{}, error) {
 
 // CheckCorpus verifies that the types in vals match the expected types
 // provided.
-func CheckCorpus(vals []interface{}, types []reflect.Type) error {
+func CheckCorpus(vals []any, types []reflect.Type) error {
 	if len(vals) != len(types) {
 		return fmt.Errorf("wrong number of values in corpus entry: %d, want %d", len(vals), len(types))
 	}
+	valsT := make([]reflect.Type, len(vals))
+	for valsI, v := range vals {
+		valsT[valsI] = reflect.TypeOf(v)
+	}
 	for i := range types {
-		if reflect.TypeOf(vals[i]) != types[i] {
-			return fmt.Errorf("mismatched types in corpus entry: %v, want %v", vals, types)
+		if valsT[i] != types[i] {
+			return fmt.Errorf("mismatched types in corpus entry: %v, want %v", valsT, types)
 		}
 	}
 	return nil
 }
 
-// writeToCorpus atomically writes the given bytes to a new file in testdata.
-// If the directory does not exist, it will create one. If the file already
-// exists, writeToCorpus will not rewrite it. writeToCorpus returns the
-// file's name, or an error if it failed.
-func writeToCorpus(b []byte, dir string) (name string, err error) {
-	sum := fmt.Sprintf("%x", sha256.Sum256(b))
-	name = filepath.Join(dir, sum)
+// writeToCorpus atomically writes the given bytes to a new file in testdata. If
+// the directory does not exist, it will create one. If the file already exists,
+// writeToCorpus will not rewrite it. writeToCorpus sets entry.Path to the new
+// file that was just written or an error if it failed.
+func writeToCorpus(entry *CorpusEntry, dir string) (err error) {
+	sum := fmt.Sprintf("%x", sha256.Sum256(entry.Data))
+	entry.Path = filepath.Join(dir, sum)
 	if err := os.MkdirAll(dir, 0777); err != nil {
-		return "", err
+		return err
 	}
-	if err := ioutil.WriteFile(name, b, 0666); err != nil {
-		os.Remove(name) // remove partially written file
-		return "", err
+	if err := ioutil.WriteFile(entry.Path, entry.Data, 0666); err != nil {
+		os.Remove(entry.Path) // remove partially written file
+		return err
 	}
-	return name, nil
+	return nil
 }
 
-func zeroValue(t reflect.Type) interface{} {
+func testName(path string) string {
+	return filepath.Base(path)
+}
+
+func zeroValue(t reflect.Type) any {
 	for _, v := range zeroVals {
 		if reflect.TypeOf(v) == t {
 			return v
@@ -1011,7 +1058,7 @@ func zeroValue(t reflect.Type) interface{} {
 	panic(fmt.Sprintf("unsupported type: %v", t))
 }
 
-var zeroVals []interface{} = []interface{}{
+var zeroVals []any = []any{
 	[]byte(""),
 	string(""),
 	false,
@@ -1038,13 +1085,7 @@ var (
 
 func shouldPrintDebugInfo() bool {
 	debugInfoOnce.Do(func() {
-		debug := strings.Split(os.Getenv("GODEBUG"), ",")
-		for _, f := range debug {
-			if f == "fuzzdebug=1" {
-				debugInfo = true
-				break
-			}
-		}
+		debugInfo = godebug.Get("fuzzdebug") == "1"
 	})
 	return debugInfo
 }

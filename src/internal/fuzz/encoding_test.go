@@ -103,6 +103,26 @@ float64(-12.5)
 float32(2.5)`,
 			ok: true,
 		},
+		{
+			// The two IEEE 754 bit patterns used for the math.Float{64,32}frombits
+			// encodings are non-math.NAN quiet-NaN values. Since they are not equal
+			// to math.NaN(), they should be re-encoded to their bit patterns. They
+			// are, respectively:
+			//   * math.Float64bits(math.NaN())+1
+			//   * math.Float32bits(float32(math.NaN()))+1
+			in: `go test fuzz v1
+float32(-0)
+float64(-0)
+float32(+Inf)
+float32(-Inf)
+float32(NaN)
+float64(+Inf)
+float64(-Inf)
+float64(NaN)
+math.Float64frombits(9221120237041090562)
+math.Float32frombits(2143289345)`,
+			ok: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.in, func(t *testing.T) {

@@ -20,6 +20,8 @@
 // or any book about automata theory.
 //
 // All characters are UTF-8-encoded code points.
+// Following utf8.DecodeRune, each byte of an invalid UTF-8 sequence
+// is treated as if it encoded utf8.RuneError (U+FFFD).
 //
 // There are 16 methods of Regexp that match a regular expression and identify
 // the matched text. Their names are matched by this regular expression:
@@ -40,11 +42,11 @@
 // successive submatches of the expression. Submatches are matches of
 // parenthesized subexpressions (also known as capturing groups) within the
 // regular expression, numbered from left to right in order of opening
-// parenthesis. Submatch 0 is the match of the entire expression, submatch 1
+// parenthesis. Submatch 0 is the match of the entire expression, submatch 1 is
 // the match of the first parenthesized subexpression, and so on.
 //
 // If 'Index' is present, matches and submatches are identified by byte index
-// pairs within the input string: result[2*n:2*n+1] identifies the indexes of
+// pairs within the input string: result[2*n:2*n+2] identifies the indexes of
 // the nth submatch. The pair for n==0 identifies the match of the entire
 // expression. If 'Index' is not present, the match is identified by the text
 // of the match/submatch. If an index is negative or text is nil, it means that
@@ -276,7 +278,11 @@ func minInputLen(re *syntax.Regexp) int {
 	case syntax.OpLiteral:
 		l := 0
 		for _, r := range re.Rune {
-			l += utf8.RuneLen(r)
+			if r == utf8.RuneError {
+				l++
+			} else {
+				l += utf8.RuneLen(r)
+			}
 		}
 		return l
 	case syntax.OpCapture, syntax.OpPlus:

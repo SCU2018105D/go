@@ -45,7 +45,7 @@ func (f *durationOrCountFlag) String() string {
 	if f.n > 0 {
 		return fmt.Sprintf("%dx", f.n)
 	}
-	return time.Duration(f.d).String()
+	return f.d.String()
 }
 
 func (f *durationOrCountFlag) Set(s string) error {
@@ -299,7 +299,12 @@ func (b *B) launch() {
 
 	// Run the benchmark for at least the specified amount of time.
 	if b.benchTime.n > 0 {
-		b.runN(b.benchTime.n)
+		// We already ran a single iteration in run1.
+		// If -benchtime=1x was requested, use that result.
+		// See https://golang.org/issue/32051.
+		if b.benchTime.n > 1 {
+			b.runN(b.benchTime.n)
+		}
 	} else {
 		d := b.benchTime.d
 		for n := int64(1); !b.failed && b.duration < d && n < 1e9; {

@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"math"
 	"strconv"
 )
 
@@ -18,7 +19,7 @@ var encVersion1 = "go test fuzz v1"
 
 // marshalCorpusFile encodes an arbitrary number of arguments into the file format for the
 // corpus.
-func marshalCorpusFile(vals ...interface{}) []byte {
+func marshalCorpusFile(vals ...any) []byte {
 	if len(vals) == 0 {
 		panic("must have at least one value to marshal")
 	}
@@ -27,8 +28,20 @@ func marshalCorpusFile(vals ...interface{}) []byte {
 	// instead of changing to byte and rune respectively.
 	for _, val := range vals {
 		switch t := val.(type) {
-		case int, int8, int16, int64, uint, uint16, uint32, uint64, float32, float64, bool:
+		case int, int8, int16, int64, uint, uint16, uint32, uint64, bool:
 			fmt.Fprintf(b, "%T(%v)\n", t, t)
+		case float32:
+			if math.IsNaN(float64(t)) && math.Float32bits(t) != math.Float32bits(float32(math.NaN())) {
+				fmt.Fprintf(b, "math.Float32frombits(%v)\n", math.Float32bits(t))
+			} else {
+				fmt.Fprintf(b, "%T(%v)\n", t, t)
+			}
+		case float64:
+			if math.IsNaN(t) && math.Float64bits(t) != math.Float64bits(math.NaN()) {
+				fmt.Fprintf(b, "math.Float64frombits(%v)\n", math.Float64bits(t))
+			} else {
+				fmt.Fprintf(b, "%T(%v)\n", t, t)
+			}
 		case string:
 			fmt.Fprintf(b, "string(%q)\n", t)
 		case rune: // int32
@@ -45,7 +58,7 @@ func marshalCorpusFile(vals ...interface{}) []byte {
 }
 
 // unmarshalCorpusFile decodes corpus bytes into their respective values.
-func unmarshalCorpusFile(b []byte) ([]interface{}, error) {
+func unmarshalCorpusFile(b []byte) ([]any, error) {
 	if len(b) == 0 {
 		return nil, fmt.Errorf("cannot unmarshal empty string")
 	}
@@ -56,7 +69,7 @@ func unmarshalCorpusFile(b []byte) ([]interface{}, error) {
 	if string(lines[0]) != encVersion1 {
 		return nil, fmt.Errorf("unknown encoding version: %s", lines[0])
 	}
-	var vals []interface{}
+	var vals []any
 	for _, line := range lines[1:] {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -71,7 +84,7 @@ func unmarshalCorpusFile(b []byte) ([]interface{}, error) {
 	return vals, nil
 }
 
-func parseCorpusValue(line []byte) (interface{}, error) {
+func parseCorpusValue(line []byte) (any, error) {
 	fs := token.NewFileSet()
 	expr, err := parser.ParseExprFrom(fs, "(test)", line, 0)
 	if err != nil {
@@ -105,44 +118,78 @@ func parseCorpusValue(line []byte) (interface{}, error) {
 		return []byte(s), nil
 	}
 
-	idType, ok := call.Fun.(*ast.Ident)
-	if !ok {
-		return nil, fmt.Errorf("expected []byte or primitive type")
-	}
-	if idType.Name == "bool" {
-		id, ok := arg.(*ast.Ident)
+	var idType *ast.Ident
+	if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+		xIdent, ok := selector.X.(*ast.Ident)
+		if !ok || xIdent.Name != "math" {
+			return nil, fmt.Errorf("invalid selector type")
+		}
+		switch selector.Sel.Name {
+		case "Float64frombits":
+			idType = &ast.Ident{Name: "float64-bits"}
+		case "Float32frombits":
+			idType = &ast.Ident{Name: "float32-bits"}
+		default:
+			return nil, fmt.Errorf("invalid selector type")
+		}
+	} else {
+		idType, ok = call.Fun.(*ast.Ident)
 		if !ok {
-			return nil, fmt.Errorf("malformed bool")
+			return nil, fmt.Errorf("expected []byte or primitive type")
 		}
-		if id.Name == "true" {
-			return true, nil
-		} else if id.Name == "false" {
-			return false, nil
-		} else {
-			return nil, fmt.Errorf("true or false required for type bool")
+		if idType.Name == "bool" {
+			id, ok := arg.(*ast.Ident)
+			if !ok {
+				return nil, fmt.Errorf("malformed bool")
+			}
+			if id.Name == "true" {
+				return true, nil
+			} else if id.Name == "false" {
+				return false, nil
+			} else {
+				return nil, fmt.Errorf("true or false required for type bool")
+			}
 		}
 	}
+
 	var (
 		val  string
 		kind token.Token
 	)
 	if op, ok := arg.(*ast.UnaryExpr); ok {
-		// Special case for negative numbers.
-		lit, ok := op.X.(*ast.BasicLit)
-		if !ok || (lit.Kind != token.INT && lit.Kind != token.FLOAT) {
+		switch lit := op.X.(type) {
+		case *ast.BasicLit:
+			if op.Op != token.SUB {
+				return nil, fmt.Errorf("unsupported operation on int/float: %v", op.Op)
+			}
+			// Special case for negative numbers.
+			val = op.Op.String() + lit.Value // e.g. "-" + "124"
+			kind = lit.Kind
+		case *ast.Ident:
+			if lit.Name != "Inf" {
+				return nil, fmt.Errorf("expected operation on int or float type")
+			}
+			if op.Op == token.SUB {
+				val = "-Inf"
+			} else {
+				val = "+Inf"
+			}
+			kind = token.FLOAT
+		default:
 			return nil, fmt.Errorf("expected operation on int or float type")
 		}
-		if op.Op != token.SUB {
-			return nil, fmt.Errorf("unsupported operation on int: %v", op.Op)
-		}
-		val = op.Op.String() + lit.Value // e.g. "-" + "124"
-		kind = lit.Kind
 	} else {
-		lit, ok := arg.(*ast.BasicLit)
-		if !ok {
+		switch lit := arg.(type) {
+		case *ast.BasicLit:
+			val, kind = lit.Value, lit.Kind
+		case *ast.Ident:
+			if lit.Name != "NaN" {
+				return nil, fmt.Errorf("literal value required for primitive type")
+			}
+			val, kind = "NaN", token.FLOAT
+		default:
 			return nil, fmt.Errorf("literal value required for primitive type")
 		}
-		val, kind = lit.Value, lit.Kind
 	}
 
 	switch typ := idType.Name; typ {
@@ -191,13 +238,31 @@ func parseCorpusValue(line []byte) (interface{}, error) {
 			return nil, fmt.Errorf("float or integer literal required for float64 type")
 		}
 		return strconv.ParseFloat(val, 64)
+	case "float32-bits":
+		if kind != token.INT {
+			return nil, fmt.Errorf("integer literal required for math.Float32frombits type")
+		}
+		bits, err := parseUint(val, "uint32")
+		if err != nil {
+			return nil, err
+		}
+		return math.Float32frombits(bits.(uint32)), nil
+	case "float64-bits":
+		if kind != token.FLOAT && kind != token.INT {
+			return nil, fmt.Errorf("integer literal required for math.Float64frombits type")
+		}
+		bits, err := parseUint(val, "uint64")
+		if err != nil {
+			return nil, err
+		}
+		return math.Float64frombits(bits.(uint64)), nil
 	default:
 		return nil, fmt.Errorf("expected []byte or primitive type")
 	}
 }
 
 // parseInt returns an integer of value val and type typ.
-func parseInt(val, typ string) (interface{}, error) {
+func parseInt(val, typ string) (any, error) {
 	switch typ {
 	case "int":
 		return strconv.Atoi(val)
@@ -218,7 +283,7 @@ func parseInt(val, typ string) (interface{}, error) {
 }
 
 // parseInt returns an unsigned integer of value val and type typ.
-func parseUint(val, typ string) (interface{}, error) {
+func parseUint(val, typ string) (any, error) {
 	switch typ {
 	case "uint":
 		i, err := strconv.ParseUint(val, 10, 0)

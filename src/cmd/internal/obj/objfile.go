@@ -347,7 +347,8 @@ func (w *writer) Sym(s *LSym) {
 			strings.HasPrefix(name, "runtime.gcbits."),
 			strings.HasSuffix(name, ".opendefer"),
 			strings.HasSuffix(name, ".arginfo0"),
-			strings.HasSuffix(name, ".arginfo1"):
+			strings.HasSuffix(name, ".arginfo1"),
+			strings.HasSuffix(name, ".argliveinfo"):
 			// These are just bytes, or varints.
 			align = 1
 		case strings.HasPrefix(name, "gclocals·"):
@@ -415,6 +416,8 @@ func contentHashSection(s *LSym) byte {
 		strings.HasSuffix(name, ".opendefer") ||
 		strings.HasSuffix(name, ".arginfo0") ||
 		strings.HasSuffix(name, ".arginfo1") ||
+		strings.HasSuffix(name, ".argliveinfo") ||
+		strings.HasSuffix(name, ".wrapinfo") ||
 		strings.HasSuffix(name, ".args_stackmap") ||
 		strings.HasSuffix(name, ".stkobj") {
 		return 'F' // go.func.* or go.funcrel.*
@@ -804,7 +807,7 @@ func (ctxt *Link) writeSymDebugNamed(s *LSym, name string) {
 	fmt.Fprintf(ctxt.Bso, "size=%d", s.Size)
 	if s.Type == objabi.STEXT {
 		fn := s.Func()
-		fmt.Fprintf(ctxt.Bso, " args=%#x locals=%#x funcid=%#x", uint64(fn.Args), uint64(fn.Locals), uint64(fn.FuncID))
+		fmt.Fprintf(ctxt.Bso, " args=%#x locals=%#x funcid=%#x align=%#x", uint64(fn.Args), uint64(fn.Locals), uint64(fn.FuncID), uint64(fn.Align))
 		if s.Leaf() {
 			fmt.Fprintf(ctxt.Bso, " leaf")
 		}

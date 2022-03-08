@@ -539,7 +539,8 @@ func (ctxt *Link) symtab(pcln *pclntab) []sym.SymKind {
 			ldr.SetAttrNotInSymbolTable(s, true)
 			ldr.SetCarrierSym(s, symgostring)
 
-		case strings.HasPrefix(name, "runtime.gcbits."):
+		case strings.HasPrefix(name, "runtime.gcbits."),
+			strings.HasPrefix(name, "type..gcprog."):
 			symGroupType[s] = sym.SGCBITS
 			ldr.SetAttrNotInSymbolTable(s, true)
 			ldr.SetCarrierSym(s, symgcbits)
@@ -565,6 +566,8 @@ func (ctxt *Link) symtab(pcln *pclntab) []sym.SymKind {
 			strings.HasSuffix(name, ".opendefer"),
 			strings.HasSuffix(name, ".arginfo0"),
 			strings.HasSuffix(name, ".arginfo1"),
+			strings.HasSuffix(name, ".argliveinfo"),
+			strings.HasSuffix(name, ".wrapinfo"),
 			strings.HasSuffix(name, ".args_stackmap"),
 			strings.HasSuffix(name, ".stkobj"):
 			ldr.SetAttrNotInSymbolTable(s, true)

@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build darwin || linux
-// +build darwin linux
+//go:build darwin || freebsd || linux
 
 package fuzz
 
@@ -48,7 +47,7 @@ func (m *sharedMem) Close() error {
 	return nil
 }
 
-// setWorkerComm configures communciation channels on the cmd that will
+// setWorkerComm configures communication channels on the cmd that will
 // run a worker process.
 func setWorkerComm(cmd *exec.Cmd, comm workerComm) {
 	mem := <-comm.memMu

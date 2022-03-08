@@ -301,6 +301,7 @@ const (
 	_PCDATA_UnsafePoint   = 0
 	_PCDATA_StackMapIndex = 1
 	_PCDATA_InlTreeIndex  = 2
+	_PCDATA_ArgLiveIndex  = 3
 
 	_FUNCDATA_ArgsPointerMaps    = 0
 	_FUNCDATA_LocalsPointerMaps  = 1
@@ -308,6 +309,8 @@ const (
 	_FUNCDATA_InlTree            = 3
 	_FUNCDATA_OpenCodedDeferInfo = 4
 	_FUNCDATA_ArgInfo            = 5
+	_FUNCDATA_ArgLiveInfo        = 6
+	_FUNCDATA_WrapInfo           = 7
 
 	_ArgsSizeUnknown = -0x80000000
 )
@@ -406,7 +409,7 @@ type pcHeader struct {
 
 // moduledata records information about the layout of the executable
 // image. It is written by the linker. Any changes here must be
-// matched changes to the code in cmd/internal/ld/symtab.go:symtab.
+// matched changes to the code in cmd/link/internal/ld/symtab.go:symtab.
 // moduledata is stored in statically allocated non-pointer memory;
 // none of the pointers here are visible to the garbage collector.
 type moduledata struct {
@@ -527,8 +530,11 @@ func modulesinit() {
 		}
 		*modules = append(*modules, md)
 		if md.gcdatamask == (bitvector{}) {
-			md.gcdatamask = progToPointerMask((*byte)(unsafe.Pointer(md.gcdata)), md.edata-md.data)
-			md.gcbssmask = progToPointerMask((*byte)(unsafe.Pointer(md.gcbss)), md.ebss-md.bss)
+			scanDataSize := md.edata - md.data
+			md.gcdatamask = progToPointerMask((*byte)(unsafe.Pointer(md.gcdata)), scanDataSize)
+			scanBSSSize := md.ebss - md.bss
+			md.gcbssmask = progToPointerMask((*byte)(unsafe.Pointer(md.gcbss)), scanBSSSize)
+			gcController.addGlobals(int64(scanDataSize + scanBSSSize))
 		}
 	}
 
@@ -623,9 +629,7 @@ func moduledataverify1(datap *moduledata) {
 	}
 
 	min := datap.textAddr(datap.ftab[0].entryoff)
-	// The max PC is outside of the text section.
-	// Subtract 1 to get a PC inside the text section, look it up, then add 1 back in.
-	max := datap.textAddr(datap.ftab[nftab].entryoff-1) + 1
+	max := datap.textAddr(datap.ftab[nftab].entryoff)
 	if datap.minpc != min || datap.maxpc != max {
 		println("minpc=", hex(datap.minpc), "min=", hex(min), "maxpc=", hex(datap.maxpc), "max=", hex(max))
 		throw("minpc or maxpc invalid")
@@ -660,9 +664,10 @@ func (md *moduledata) textAddr(off32 uint32) uintptr {
 	off := uintptr(off32)
 	res := md.text + off
 	if len(md.textsectmap) > 1 {
-		for i := range md.textsectmap {
-			if off >= md.textsectmap[i].vaddr && off < md.textsectmap[i].end {
-				res = md.textsectmap[i].baseaddr + off - md.textsectmap[i].vaddr
+		for i, sect := range md.textsectmap {
+			// For the last section, include the end address (etext), as it is included in the functab.
+			if off >= sect.vaddr && off < sect.end || (i == len(md.textsectmap)-1 && off == sect.end) {
+				res = sect.baseaddr + off - sect.vaddr
 				break
 			}
 		}
@@ -672,6 +677,33 @@ func (md *moduledata) textAddr(off32 uint32) uintptr {
 		}
 	}
 	return res
+}
+
+// textOff is the opposite of textAddr. It converts a PC to a (virtual) offset
+// to md.text, and returns if the PC is in any Go text section.
+//
+// It is nosplit because it is part of the findfunc implementation.
+//go:nosplit
+func (md *moduledata) textOff(pc uintptr) (uint32, bool) {
+	res := uint32(pc - md.text)
+	if len(md.textsectmap) > 1 {
+		for i, sect := range md.textsectmap {
+			if sect.baseaddr > pc {
+				// pc is not in any section.
+				return 0, false
+			}
+			end := sect.baseaddr + (sect.end - sect.vaddr)
+			// For the last section, include the end address (etext), as it is included in the functab.
+			if i == len(md.textsectmap) {
+				end++
+			}
+			if pc < end {
+				res = uint32(pc - sect.baseaddr + sect.vaddr)
+				break
+			}
+		}
+	}
+	return res, true
 }
 
 // FuncForPC returns a *Func describing the function that contains the
@@ -797,7 +829,12 @@ func findfunc(pc uintptr) funcInfo {
 	}
 	const nsub = uintptr(len(findfuncbucket{}.subbuckets))
 
-	x := pc - datap.minpc
+	pcOff, ok := datap.textOff(pc)
+	if !ok {
+		return funcInfo{}
+	}
+
+	x := uintptr(pcOff) + datap.text - datap.minpc // TODO: are datap.text and datap.minpc always equal?
 	b := x / pcbucketsize
 	i := x % pcbucketsize / (pcbucketsize / nsub)
 
@@ -805,43 +842,11 @@ func findfunc(pc uintptr) funcInfo {
 	idx := ffb.idx + uint32(ffb.subbuckets[i])
 
 	// Find the ftab entry.
-	if len(datap.textsectmap) == 1 {
-		// fast path for the common case
-		pcOff := uint32(pc - datap.text)
-		for datap.ftab[idx+1].entryoff <= pcOff {
-			idx++
-		}
-	} else {
-		// Multiple text sections.
-		// If the idx is beyond the end of the ftab, set it to the end of the table and search backward.
-		if idx >= uint32(len(datap.ftab)) {
-			idx = uint32(len(datap.ftab) - 1)
-		}
-		if pc < datap.textAddr(datap.ftab[idx].entryoff) {
-			// The idx might reference a function address that
-			// is higher than the pcOff being searched, so search backward until the matching address is found.
-			for datap.textAddr(datap.ftab[idx].entryoff) > pc && idx > 0 {
-				idx--
-			}
-			if idx == 0 {
-				throw("findfunc: bad findfunctab entry idx")
-			}
-		} else {
-			// linear search to find func with pc >= entry.
-			for datap.textAddr(datap.ftab[idx+1].entryoff) <= pc {
-				idx++
-			}
-		}
+	for datap.ftab[idx+1].entryoff <= pcOff {
+		idx++
 	}
 
 	funcoff := datap.ftab[idx].funcoff
-	if funcoff == ^uint32(0) {
-		// With multiple text sections, there may be functions inserted by the external
-		// linker that are not known by Go. This means there may be holes in the PC
-		// range covered by the func table. The invalid funcoff value indicates a hole.
-		// See also cmd/link/internal/ld/pcln.go:pclntab
-		return funcInfo{}
-	}
 	return funcInfo{(*_func)(unsafe.Pointer(&datap.pclntable[funcoff])), datap}
 }
 
@@ -859,7 +864,7 @@ type pcvalueCacheEnt struct {
 
 // pcvalueCacheKey returns the outermost index in a pcvalueCache to use for targetpc.
 // It must be very cheap to calculate.
-// For now, align to sys.PtrSize and reduce mod the number of entries.
+// For now, align to goarch.PtrSize and reduce mod the number of entries.
 // In practice, this appears to be fairly randomly and evenly distributed.
 func pcvalueCacheKey(targetpc uintptr) uintptr {
 	return (targetpc / goarch.PtrSize) % uintptr(len(pcvalueCache{}.entries))

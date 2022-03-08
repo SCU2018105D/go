@@ -4,10 +4,10 @@
 
 package p
 
-// TODO(gri) Still need better error positions and message here.
-//           But this doesn't crash anymore.
-
-func f[P /* ERROR does not match \*Q */ interface{*Q}, Q any](p P, q Q) {
+func f[P *Q, Q any](P, Q) {
 	_ = f[P]
-        _ = f /* ERROR cannot infer P */ [*P]
+}
+
+func f2[P /* ERROR instantiation cycle */ *Q, Q any](P, Q) {
+	_ = f2[*P]
 }

@@ -3,8 +3,6 @@
 // license that can be found in the LICENSE file.
 
 //go:build linux && (ppc64 || ppc64le)
-// +build linux
-// +build ppc64 ppc64le
 
 #include "textflag.h"
 
@@ -32,7 +30,7 @@ TEXT ·Syscall(SB),NOSPLIT,$0-56
 	RET
 ok:
 	MOVD	R3, r1+32(FP)	// r1
-	MOVD	R4, r2+40(FP)	// r2
+	MOVD	R0, r2+40(FP)	// r2
 	MOVD	R0, err+48(FP)	// errno
 	BL	runtime·exitsyscall(SB)
 	RET
@@ -56,7 +54,7 @@ TEXT ·Syscall6(SB),NOSPLIT,$0-80
 	RET
 ok6:
 	MOVD	R3, r1+56(FP)	// r1
-	MOVD	R4, r2+64(FP)	// r2
+	MOVD	R0, r2+64(FP)	// r2
 	MOVD	R0, err+72(FP)	// errno
 	BL	runtime·exitsyscall(SB)
 	RET
@@ -78,7 +76,7 @@ TEXT ·RawSyscall(SB),NOSPLIT,$0-56
 	RET
 ok1:
 	MOVD	R3, r1+32(FP)	// r1
-	MOVD	R4, r2+40(FP)	// r2
+	MOVD	R0, r2+40(FP)	// r2
 	MOVD	R0, err+48(FP)	// errno
 	RET
 
@@ -99,7 +97,7 @@ TEXT ·RawSyscall6(SB),NOSPLIT,$0-80
 	RET
 ok2:
 	MOVD	R3, r1+56(FP)	// r1
-	MOVD	R4, r2+64(FP)	// r2
+	MOVD	R0, r2+64(FP)	// r2
 	MOVD	R0, err+72(FP)	// errno
 	RET
 
@@ -133,5 +131,5 @@ TEXT ·rawSyscallNoError(SB),NOSPLIT,$0-48
 	MOVD	trap+0(FP), R9	// syscall entry
 	SYSCALL R9
 	MOVD	R3, r1+32(FP)
-	MOVD	R4, r2+40(FP)
+	MOVD	R0, r2+40(FP)
 	RET

@@ -329,20 +329,20 @@ func semacreate(mp *m) {
 
 //go:nosplit
 func semasleep(ns int64) int32 {
-	_m_ := getg().m
+	mp := getg().m
 	if ns >= 0 {
-		_m_.ts.tv_sec = ns / 1000000000
-		_m_.ts.tv_nsec = ns % 1000000000
+		mp.ts.tv_sec = ns / 1000000000
+		mp.ts.tv_nsec = ns % 1000000000
 
-		_m_.libcall.fn = uintptr(unsafe.Pointer(&libc_sem_reltimedwait_np))
-		_m_.libcall.n = 2
-		_m_.scratch = mscratch{}
-		_m_.scratch.v[0] = _m_.waitsema
-		_m_.scratch.v[1] = uintptr(unsafe.Pointer(&_m_.ts))
-		_m_.libcall.args = uintptr(unsafe.Pointer(&_m_.scratch))
-		asmcgocall(unsafe.Pointer(&asmsysvicall6x), unsafe.Pointer(&_m_.libcall))
-		if *_m_.perrno != 0 {
-			if *_m_.perrno == _ETIMEDOUT || *_m_.perrno == _EAGAIN || *_m_.perrno == _EINTR {
+		mp.libcall.fn = uintptr(unsafe.Pointer(&libc_sem_reltimedwait_np))
+		mp.libcall.n = 2
+		mp.scratch = mscratch{}
+		mp.scratch.v[0] = mp.waitsema
+		mp.scratch.v[1] = uintptr(unsafe.Pointer(&mp.ts))
+		mp.libcall.args = uintptr(unsafe.Pointer(&mp.scratch))
+		asmcgocall(unsafe.Pointer(&asmsysvicall6x), unsafe.Pointer(&mp.libcall))
+		if *mp.perrno != 0 {
+			if *mp.perrno == _ETIMEDOUT || *mp.perrno == _EAGAIN || *mp.perrno == _EINTR {
 				return -1
 			}
 			throw("sem_reltimedwait_np")
@@ -350,16 +350,16 @@ func semasleep(ns int64) int32 {
 		return 0
 	}
 	for {
-		_m_.libcall.fn = uintptr(unsafe.Pointer(&libc_sem_wait))
-		_m_.libcall.n = 1
-		_m_.scratch = mscratch{}
-		_m_.scratch.v[0] = _m_.waitsema
-		_m_.libcall.args = uintptr(unsafe.Pointer(&_m_.scratch))
-		asmcgocall(unsafe.Pointer(&asmsysvicall6x), unsafe.Pointer(&_m_.libcall))
-		if _m_.libcall.r1 == 0 {
+		mp.libcall.fn = uintptr(unsafe.Pointer(&libc_sem_wait))
+		mp.libcall.n = 1
+		mp.scratch = mscratch{}
+		mp.scratch.v[0] = mp.waitsema
+		mp.libcall.args = uintptr(unsafe.Pointer(&mp.scratch))
+		asmcgocall(unsafe.Pointer(&asmsysvicall6x), unsafe.Pointer(&mp.libcall))
+		if mp.libcall.r1 == 0 {
 			break
 		}
-		if *_m_.perrno == _EINTR {
+		if *mp.perrno == _EINTR {
 			continue
 		}
 		throw("sem_wait")
@@ -562,13 +562,6 @@ func write1(fd uintptr, buf unsafe.Pointer, nbyte int32) int32 {
 }
 
 //go:nosplit
-func pipe() (r, w int32, errno int32) {
-	var p [2]int32
-	_, e := sysvicall1Err(&libc_pipe, uintptr(noescape(unsafe.Pointer(&p))))
-	return p[0], p[1], int32(e)
-}
-
-//go:nosplit
 func pipe2(flags int32) (r, w int32, errno int32) {
 	var p [2]int32
 	_, e := sysvicall2Err(&libc_pipe2, uintptr(noescape(unsafe.Pointer(&p))), uintptr(flags))
@@ -578,12 +571,6 @@ func pipe2(flags int32) (r, w int32, errno int32) {
 //go:nosplit
 func closeonexec(fd int32) {
 	fcntl(fd, _F_SETFD, _FD_CLOEXEC)
-}
-
-//go:nosplit
-func setNonblock(fd int32) {
-	flags := fcntl(fd, _F_GETFL, 0)
-	fcntl(fd, _F_SETFL, flags|_O_NONBLOCK)
 }
 
 func osyield1()
@@ -633,4 +620,13 @@ func sysauxv(auxv []uintptr) {
 			executablePath = gostringnocopy((*byte)(unsafe.Pointer(val)))
 		}
 	}
+}
+
+// sigPerThreadSyscall is only used on linux, so we assign a bogus signal
+// number.
+const sigPerThreadSyscall = 1 << 31
+
+//go:nosplit
+func runPerThreadSyscall() {
+	throw("runPerThreadSyscall only valid on linux")
 }

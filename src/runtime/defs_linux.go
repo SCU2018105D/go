@@ -3,7 +3,6 @@
 // license that can be found in the LICENSE file.
 
 //go:build ignore
-// +build ignore
 
 /*
 Input to cgo -cdefs
@@ -38,7 +37,6 @@ const (
 	EINTR  = C.EINTR
 	EAGAIN = C.EAGAIN
 	ENOMEM = C.ENOMEM
-	ENOSYS = C.ENOSYS
 
 	PROT_NONE  = C.PROT_NONE
 	PROT_READ  = C.PROT_READ
@@ -91,6 +89,8 @@ const (
 	SIGIO     = C.SIGIO
 	SIGPWR    = C.SIGPWR
 	SIGSYS    = C.SIGSYS
+
+	SIGRTMIN = C.SIGRTMIN
 
 	FPE_INTDIV = C.FPE_INTDIV
 	FPE_INTOVF = C.FPE_INTOVF

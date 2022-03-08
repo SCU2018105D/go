@@ -29,7 +29,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"cmd/internal/str"
+	"cmd/internal/quoted"
 )
 
 var debugDefine = flag.Bool("debug-define", false, "print relevant #defines")
@@ -1506,7 +1506,7 @@ func (p *Package) rewriteName(f *File, r *Ref, addPosition bool) ast.Expr {
 				Args: []ast.Expr{getNewIdent(name.Mangle)},
 			}
 		case "type":
-			// Okay - might be new(T)
+			// Okay - might be new(T), T(x), Generic[T], etc.
 			if r.Name.Type == nil {
 				error_(r.Pos(), "expression C.%s: undefined C type '%s'", fixGo(r.Name.Go), r.Name.C)
 			}
@@ -1568,7 +1568,7 @@ func checkGCCBaseCmd() ([]string, error) {
 	if value == "" {
 		value = defaultCC(goos, goarch)
 	}
-	args, err := str.SplitQuotedFields(value)
+	args, err := quoted.Split(value)
 	if err != nil {
 		return nil, err
 	}

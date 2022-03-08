@@ -34,8 +34,9 @@ import (
 	"cmd/go/internal/fsys"
 	"cmd/go/internal/load"
 	"cmd/go/internal/modload"
+	"cmd/go/internal/str"
 	"cmd/go/internal/trace"
-	"cmd/internal/str"
+	"cmd/internal/quoted"
 	"cmd/internal/sys"
 )
 
@@ -223,18 +224,34 @@ func (b *Builder) buildActionID(a *Action) cache.ActionID {
 	// same compiler settings and can reuse each other's results.
 	// If not, the reason is already recorded in buildGcflags.
 	fmt.Fprintf(h, "compile\n")
-	// Only include the package directory if it may affect the output.
-	// We trim workspace paths for all packages when -trimpath is set.
-	// The compiler hides the exact value of $GOROOT
-	// when building things in GOROOT.
-	// Assume b.WorkDir is being trimmed properly.
-	// When -trimpath is used with a package built from the module cache,
-	// use the module path and version instead of the directory.
-	if !p.Goroot && !cfg.BuildTrimpath && !strings.HasPrefix(p.Dir, b.WorkDir) {
+
+	// Include information about the origin of the package that
+	// may be embedded in the debug info for the object file.
+	if cfg.BuildTrimpath {
+		// When -trimpath is used with a package built from the module cache,
+		// its debug information refers to the module path and version
+		// instead of the directory.
+		if p.Module != nil {
+			fmt.Fprintf(h, "module %s@%s\n", p.Module.Path, p.Module.Version)
+		}
+	} else if p.Goroot {
+		// The Go compiler always hides the exact value of $GOROOT
+		// when building things in GOROOT.
+		//
+		// The C compiler does not, but for packages in GOROOT we rewrite the path
+		// as though -trimpath were set, so that we don't invalidate the build cache
+		// (and especially any precompiled C archive files) when changing
+		// GOROOT_FINAL. (See https://go.dev/issue/50183.)
+		//
+		// b.WorkDir is always either trimmed or rewritten to
+		// the literal string "/tmp/go-build".
+	} else if !strings.HasPrefix(p.Dir, b.WorkDir) {
+		// -trimpath is not set and no other rewrite rules apply,
+		// so the object file may refer to the absolute directory
+		// containing the package.
 		fmt.Fprintf(h, "dir %s\n", p.Dir)
-	} else if cfg.BuildTrimpath && p.Module != nil {
-		fmt.Fprintf(h, "module %s@%s\n", p.Module.Path, p.Module.Version)
 	}
+
 	if p.Module != nil {
 		fmt.Fprintf(h, "go %s\n", p.Module.GoVersion)
 	}
@@ -543,7 +560,7 @@ func (b *Builder) build(ctx context.Context, a *Action) (err error) {
 		return nil
 	}
 
-	if err := allowInstall(a); err != nil {
+	if err := AllowInstall(a); err != nil {
 		return err
 	}
 
@@ -779,10 +796,13 @@ OverlayLoop:
 	}
 
 	if p.Internal.BuildInfo != "" && cfg.ModulesEnabled {
-		if err := b.writeFile(objdir+"_gomod_.go", modload.ModInfoProg(p.Internal.BuildInfo, cfg.BuildToolchainName == "gccgo")); err != nil {
-			return err
+		prog := modload.ModInfoProg(p.Internal.BuildInfo, cfg.BuildToolchainName == "gccgo")
+		if len(prog) > 0 {
+			if err := b.writeFile(objdir+"_gomod_.go", prog); err != nil {
+				return err
+			}
+			gofiles = append(gofiles, objdir+"_gomod_.go")
 		}
-		gofiles = append(gofiles, objdir+"_gomod_.go")
 	}
 
 	// Compile Go.
@@ -1326,7 +1346,7 @@ func (b *Builder) link(ctx context.Context, a *Action) (err error) {
 		return err
 	}
 
-	if err := allowInstall(a); err != nil {
+	if err := AllowInstall(a); err != nil {
 		return err
 	}
 
@@ -1379,6 +1399,7 @@ func (b *Builder) writeLinkImportcfg(a *Action, file string) error {
 			fmt.Fprintf(&icfg, "packageshlib %s=%s\n", p1.ImportPath, p1.Shlib)
 		}
 	}
+	fmt.Fprintf(&icfg, "modinfo %q\n", modload.ModInfoData(a.Package.Internal.BuildInfo))
 	return b.writeFile(file, icfg.Bytes())
 }
 
@@ -1506,7 +1527,7 @@ func (b *Builder) getPkgConfigFlags(p *load.Package) (cflags, ldflags []string, 
 }
 
 func (b *Builder) installShlibname(ctx context.Context, a *Action) error {
-	if err := allowInstall(a); err != nil {
+	if err := AllowInstall(a); err != nil {
 		return err
 	}
 
@@ -1560,7 +1581,7 @@ func (b *Builder) linkShared(ctx context.Context, a *Action) (err error) {
 	}
 	defer b.flushOutput(a)
 
-	if err := allowInstall(a); err != nil {
+	if err := AllowInstall(a); err != nil {
 		return err
 	}
 
@@ -1631,7 +1652,7 @@ func BuildInstallFunc(b *Builder, ctx context.Context, a *Action) (err error) {
 		if !a.buggyInstall && !b.IsCmdList {
 			if cfg.BuildN {
 				b.Showcmd("", "touch %s", a.Target)
-			} else if err := allowInstall(a); err == nil {
+			} else if err := AllowInstall(a); err == nil {
 				now := time.Now()
 				os.Chtimes(a.Target, now, now)
 			}
@@ -1645,7 +1666,7 @@ func BuildInstallFunc(b *Builder, ctx context.Context, a *Action) (err error) {
 		a.built = a1.built
 		return nil
 	}
-	if err := allowInstall(a); err != nil {
+	if err := AllowInstall(a); err != nil {
 		return err
 	}
 
@@ -1677,12 +1698,12 @@ func BuildInstallFunc(b *Builder, ctx context.Context, a *Action) (err error) {
 	return b.moveOrCopyFile(a.Target, a1.built, perm, false)
 }
 
-// allowInstall returns a non-nil error if this invocation of the go command is
+// AllowInstall returns a non-nil error if this invocation of the go command is
 // allowed to install a.Target.
 //
-// (The build of cmd/go running under its own test is forbidden from installing
-// to its original GOROOT.)
-var allowInstall = func(*Action) error { return nil }
+// The build of cmd/go running under its own test is forbidden from installing
+// to its original GOROOT. The var is exported so it can be set by TestMain.
+var AllowInstall = func(*Action) error { return nil }
 
 // cleanup removes a's object dir to keep the amount of
 // on-disk garbage down in a large build. On an operating system
@@ -1847,7 +1868,7 @@ func (b *Builder) installHeader(ctx context.Context, a *Action) error {
 		return nil
 	}
 
-	if err := allowInstall(a); err != nil {
+	if err := AllowInstall(a); err != nil {
 		return err
 	}
 
@@ -1929,7 +1950,7 @@ func mayberemovefile(s string) {
 //	fmtcmd replaces the name of the current directory with dot (.)
 //	but only when it is at the beginning of a space-separated token.
 //
-func (b *Builder) fmtcmd(dir string, format string, args ...interface{}) string {
+func (b *Builder) fmtcmd(dir string, format string, args ...any) string {
 	cmd := fmt.Sprintf(format, args...)
 	if dir != "" && dir != "/" {
 		dot := " ."
@@ -1955,7 +1976,7 @@ func (b *Builder) fmtcmd(dir string, format string, args ...interface{}) string 
 
 // showcmd prints the given command to standard output
 // for the implementation of -n or -x.
-func (b *Builder) Showcmd(dir string, format string, args ...interface{}) {
+func (b *Builder) Showcmd(dir string, format string, args ...any) {
 	b.output.Lock()
 	defer b.output.Unlock()
 	b.Print(b.fmtcmd(dir, format, args...) + "\n")
@@ -1992,6 +2013,7 @@ func (b *Builder) showOutput(a *Action, dir, desc, out string) {
 	if reldir := base.ShortPath(dir); reldir != dir {
 		suffix = strings.ReplaceAll(suffix, " "+dir, " "+reldir)
 		suffix = strings.ReplaceAll(suffix, "\n"+dir, "\n"+reldir)
+		suffix = strings.ReplaceAll(suffix, "\n\t"+dir, "\n\t"+reldir)
 	}
 	suffix = strings.ReplaceAll(suffix, " "+b.WorkDir, " $WORK")
 
@@ -2019,7 +2041,7 @@ var cgoTypeSigRe = lazyregexp.New(`\b_C2?(type|func|var|macro)_\B`)
 // run runs the command given by cmdline in the directory dir.
 // If the command fails, run prints information about the failure
 // and returns a non-nil error.
-func (b *Builder) run(a *Action, dir string, desc string, env []string, cmdargs ...interface{}) error {
+func (b *Builder) run(a *Action, dir string, desc string, env []string, cmdargs ...any) error {
 	out, err := b.runOut(a, dir, env, cmdargs...)
 	if len(out) > 0 {
 		if desc == "" {
@@ -2053,7 +2075,7 @@ func (b *Builder) processOutput(out []byte) string {
 // runOut runs the command given by cmdline in the directory dir.
 // It returns the command output and any errors that occurred.
 // It accumulates execution time in a.
-func (b *Builder) runOut(a *Action, dir string, env []string, cmdargs ...interface{}) ([]byte, error) {
+func (b *Builder) runOut(a *Action, dir string, env []string, cmdargs ...any) ([]byte, error) {
 	cmdline := str.StringList(cmdargs...)
 
 	for _, arg := range cmdline {
@@ -2318,7 +2340,7 @@ func (b *Builder) ccompile(a *Action, p *load.Package, outfile string, flags []s
 	// directives pointing to the source directory. It should not generate those
 	// when -trimpath is enabled.
 	if b.gccSupportsFlag(compiler, "-fdebug-prefix-map=a=b") {
-		if cfg.BuildTrimpath {
+		if cfg.BuildTrimpath || p.Goroot {
 			// Keep in sync with Action.trimpath.
 			// The trimmed paths are a little different, but we need to trim in the
 			// same situations.
@@ -2340,8 +2362,6 @@ func (b *Builder) ccompile(a *Action, p *load.Package, outfile string, flags []s
 				to = filepath.Join("/_", toPath)
 			}
 			flags = append(flags[:len(flags):len(flags)], "-fdebug-prefix-map="+from+"="+to)
-		} else if p.Goroot && cfg.GOROOT_FINAL != cfg.GOROOT {
-			flags = append(flags[:len(flags):len(flags)], "-fdebug-prefix-map="+cfg.GOROOT+"="+cfg.GOROOT_FINAL)
 		}
 	}
 
@@ -2390,7 +2410,7 @@ func (b *Builder) gccld(a *Action, p *load.Package, objdir, outfile string, flag
 		cmd = b.GccCmd(p.Dir, objdir)
 	}
 
-	cmdargs := []interface{}{cmd, "-o", outfile, objs, flags}
+	cmdargs := []any{cmd, "-o", outfile, objs, flags}
 	dir := p.Dir
 	out, err := b.runOut(a, base.Cwd(), b.cCompilerEnv(), cmdargs...)
 
@@ -2652,7 +2672,7 @@ func envList(key, def string) []string {
 	if v == "" {
 		v = def
 	}
-	args, err := str.SplitQuotedFields(v)
+	args, err := quoted.Split(v)
 	if err != nil {
 		panic(fmt.Sprintf("could not parse environment variable %s with value %q: %v", key, v, err))
 	}
@@ -2722,6 +2742,10 @@ func (b *Builder) cgo(a *Action, cgoExe, objdir string, pcCFLAGS, pcLDFLAGS, cgo
 		cgoCFLAGS = append([]string{"-fsanitize=memory"}, cgoCFLAGS...)
 		cgoLDFLAGS = append([]string{"-fsanitize=memory"}, cgoLDFLAGS...)
 	}
+	if cfg.BuildASan {
+		cgoCFLAGS = append([]string{"-fsanitize=address"}, cgoCFLAGS...)
+		cgoLDFLAGS = append([]string{"-fsanitize=address"}, cgoLDFLAGS...)
+	}
 
 	// Allows including _cgo_export.h, as well as the user's .h files,
 	// from .[ch] files in the package.
@@ -2743,7 +2767,7 @@ func (b *Builder) cgo(a *Action, cgoExe, objdir string, pcCFLAGS, pcLDFLAGS, cgo
 	if p.Standard && p.ImportPath == "runtime/cgo" {
 		cgoflags = append(cgoflags, "-import_runtime_cgo=false")
 	}
-	if p.Standard && (p.ImportPath == "runtime/race" || p.ImportPath == "runtime/msan" || p.ImportPath == "runtime/cgo") {
+	if p.Standard && (p.ImportPath == "runtime/race" || p.ImportPath == "runtime/msan" || p.ImportPath == "runtime/cgo" || p.ImportPath == "runtime/asan") {
 		cgoflags = append(cgoflags, "-import_syscall=false")
 	}
 
