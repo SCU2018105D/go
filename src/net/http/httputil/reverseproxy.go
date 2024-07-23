@@ -30,13 +30,13 @@ import (
 type ProxyRequest struct {
 	// In is the request received by the proxy.
 	// The Rewrite function must not modify In.
-	In *http.Request
+	In *http.Request // 输入的请求信息
 
 	// Out is the request which will be sent by the proxy.
 	// The Rewrite function may modify or replace this request.
 	// Hop-by-hop headers are removed from this request
 	// before Rewrite is called.
-	Out *http.Request
+	Out *http.Request // 输出的请求信息
 }
 
 // SetURL routes the outbound request to the scheme, host, and base path
@@ -76,12 +76,15 @@ func (r *ProxyRequest) SetURL(target *url.URL) {
 //		r.SetXForwarded()
 //	}
 func (r *ProxyRequest) SetXForwarded() {
+	// 原始IP
 	clientIP, _, err := net.SplitHostPort(r.In.RemoteAddr)
 	if err == nil {
+		//
 		prior := r.Out.Header["X-Forwarded-For"]
 		if len(prior) > 0 {
 			clientIP = strings.Join(prior, ", ") + ", " + clientIP
 		}
+		//
 		r.Out.Header.Set("X-Forwarded-For", clientIP)
 	} else {
 		r.Out.Header.Del("X-Forwarded-For")
@@ -218,6 +221,7 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
+// 两个url进行合并
 func joinURLPath(a, b *url.URL) (path, rawpath string) {
 	if a.RawPath == "" && b.RawPath == "" {
 		return singleJoiningSlash(a.Path, b.Path), ""
@@ -259,6 +263,8 @@ func joinURLPath(a, b *url.URL) (path, rawpath string) {
 //			r.Out.Host = r.In.Host // if desired
 //		}
 //	}
+//
+// 设置一个单域名的反向代理
 func NewSingleHostReverseProxy(target *url.URL) *ReverseProxy {
 	director := func(req *http.Request) {
 		rewriteRequestURL(req, target)
@@ -266,10 +272,12 @@ func NewSingleHostReverseProxy(target *url.URL) *ReverseProxy {
 	return &ReverseProxy{Director: director}
 }
 
+// 进行目标地址替换
 func rewriteRequestURL(req *http.Request, target *url.URL) {
 	targetQuery := target.RawQuery
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
+	// 设置目标地址
 	req.URL.Path, req.URL.RawPath = joinURLPath(target, req.URL)
 	if targetQuery == "" || req.URL.RawQuery == "" {
 		req.URL.RawQuery = targetQuery + req.URL.RawQuery
@@ -329,12 +337,15 @@ func (p *ReverseProxy) modifyResponse(rw http.ResponseWriter, res *http.Response
 	return true
 }
 
+// 核心的http代理设置
 func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	// 传输层协议
 	transport := p.Transport
+	// 传输层为空--使用默认的传输层协议
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-
+	// 获取对应上下文
 	ctx := req.Context()
 	if ctx.Done() != nil {
 		// CloseNotifier predates context.Context, and has been
@@ -348,9 +359,12 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		// Context implementation with no cancellation signal),
 		// then consult the CloseNotifier if available.
 	} else if cn, ok := rw.(http.CloseNotifier); ok {
+		// 进行对应的取消操
 		var cancel context.CancelFunc
+		// 取消对应的上下文
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
+		// 关闭取消通知
 		notifyChan := cn.CloseNotify()
 		go func() {
 			select {
@@ -360,8 +374,9 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			}
 		}()
 	}
-
+	// 进行req复制
 	outreq := req.Clone(ctx)
+	// 为0直接返回
 	if req.ContentLength == 0 {
 		outreq.Body = nil // Issue 16036: nil Body for http.Transport retries
 	}
@@ -377,25 +392,29 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if outreq.Header == nil {
 		outreq.Header = make(http.Header) // Issue 33142: historical behavior was to always allocate
 	}
-
+	// 检查是否设置了Director代理和 rewrite函数
+	// 两个之间必须有一个不为空
 	if (p.Director != nil) == (p.Rewrite != nil) {
 		p.getErrorHandler()(rw, req, errors.New("ReverseProxy must have exactly one of Director or Rewrite set"))
 		return
 	}
-
+	// 设置了重定向，需要对原始http请求进行修改
 	if p.Director != nil {
+		// 进行请求修改
 		p.Director(outreq)
 		if outreq.Form != nil {
 			outreq.URL.RawQuery = cleanQueryParams(outreq.URL.RawQuery)
 		}
 	}
 	outreq.Close = false
-
+	// 检查是否需要进行协议升级--查询目标协议升级类型
 	reqUpType := upgradeType(outreq.Header)
+	// 检查协议是否正常
 	if !ascii.IsPrint(reqUpType) {
 		p.getErrorHandler()(rw, req, fmt.Errorf("client tried to switch to invalid protocol %q", reqUpType))
 		return
 	}
+	// 移除顶部的header
 	removeHopByHopHeaders(outreq.Header)
 
 	// Issue 21096: tell backend applications that care about trailer support
@@ -409,6 +428,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// After stripping all the hop-by-hop connection headers above, add back any
 	// necessary for protocol upgrades, such as for websockets.
+	// 检查是否存在协议升级--针对h2c和websocket
 	if reqUpType != "" {
 		outreq.Header.Set("Connection", "Upgrade")
 		outreq.Header.Set("Upgrade", reqUpType)
@@ -425,12 +445,14 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 		// Remove unparsable query parameters from the outbound request.
 		outreq.URL.RawQuery = cleanQueryParams(outreq.URL.RawQuery)
-
+		// 创建重写方法
 		pr := &ProxyRequest{
 			In:  req,
 			Out: outreq,
 		}
+		// 进行请求重写
 		p.Rewrite(pr)
+		// 重写对外请求
 		outreq = pr.Out
 	} else {
 		if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
@@ -453,7 +475,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		// don't send the default Go HTTP client User-Agent.
 		outreq.Header.Set("User-Agent", "")
 	}
-
+	// 创建trace进行client 请求配置
 	trace := &httptrace.ClientTrace{
 		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
 			h := rw.Header()
@@ -468,8 +490,9 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			return nil
 		},
 	}
+	// 外部请求
 	outreq = outreq.WithContext(httptrace.WithClientTrace(outreq.Context(), trace))
-
+	// 获取响应
 	res, err := transport.RoundTrip(outreq)
 	if err != nil {
 		p.getErrorHandler()(rw, outreq, err)
@@ -481,16 +504,17 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		if !p.modifyResponse(rw, res, outreq) {
 			return
 		}
+		// 处理内部提升的协议
 		p.handleUpgradeResponse(rw, outreq, res)
 		return
 	}
-
+	// 移除额外的头部
 	removeHopByHopHeaders(res.Header)
-
+	// 修改响应头部
 	if !p.modifyResponse(rw, res, outreq) {
 		return
 	}
-
+	// 拷贝头部信息
 	copyHeader(rw.Header(), res.Header)
 
 	// The "Trailer" header isn't included in the Transport's response,
@@ -503,9 +527,9 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 		rw.Header().Add("Trailer", strings.Join(trailerKeys, ", "))
 	}
-
+	// 进行输入写入
 	rw.WriteHeader(res.StatusCode)
-
+	// 进行拷贝
 	err = p.copyResponse(rw, res.Body, p.flushInterval(res))
 	if err != nil {
 		defer res.Body.Close()
@@ -533,7 +557,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		copyHeader(rw.Header(), res.Trailer)
 		return
 	}
-
+	// 进行响应头部设置
 	for k, vv := range res.Trailer {
 		k = http.TrailerPrefix + k
 		for _, v := range vv {
@@ -602,6 +626,7 @@ func (p *ReverseProxy) flushInterval(res *http.Response) time.Duration {
 }
 
 func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval time.Duration) error {
+	// 进行统一的刷新操作
 	if flushInterval != 0 {
 		if wf, ok := dst.(writeFlusher); ok {
 			mlw := &maxLatencyWriter{
@@ -619,22 +644,27 @@ func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval 
 	}
 
 	var buf []byte
+	// 检查buffer池是否为空
 	if p.BufferPool != nil {
+		// 获取一个空的buffer
 		buf = p.BufferPool.Get()
 		defer p.BufferPool.Put(buf)
 	}
+	// 使用buffer进行基础的数据拷贝
 	_, err := p.copyBuffer(dst, src, buf)
 	return err
 }
 
 // copyBuffer returns any write errors or non-EOF read errors, and the amount
 // of bytes written.
+// 进行基础数据拷贝
 func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
 	if len(buf) == 0 {
 		buf = make([]byte, 32*1024)
 	}
 	var written int64
 	for {
+		// 进行对应数据读取
 		nr, rerr := src.Read(buf)
 		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
 			p.logf("httputil: ReverseProxy read error during body copy: %v", rerr)
@@ -744,6 +774,7 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
 		p.getErrorHandler()(rw, req, fmt.Errorf("can't switch protocols using non-Hijacker ResponseWriter type %T", rw))
 		return
 	}
+	// 响应的TCP连接
 	backConn, ok := res.Body.(io.ReadWriteCloser)
 	if !ok {
 		p.getErrorHandler()(rw, req, fmt.Errorf("internal error: 101 switching protocols response with non-writable body"))
@@ -762,7 +793,7 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
 	}()
 
 	defer close(backConnCloseCh)
-
+	// 响应连接参数
 	conn, brw, err := hj.Hijack()
 	if err != nil {
 		p.getErrorHandler()(rw, req, fmt.Errorf("Hijack failed on protocol switch: %v", err))
@@ -784,6 +815,7 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
 	}
 	errc := make(chan error, 1)
 	spc := switchProtocolCopier{user: conn, backend: backConn}
+	// 进行
 	go spc.copyToBackend(errc)
 	go spc.copyFromBackend(errc)
 	<-errc
@@ -800,6 +832,7 @@ func (c switchProtocolCopier) copyFromBackend(errc chan<- error) {
 	errc <- err
 }
 
+// 进行接入交换，进行一次copy
 func (c switchProtocolCopier) copyToBackend(errc chan<- error) {
 	_, err := io.Copy(c.backend, c.user)
 	errc <- err

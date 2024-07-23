@@ -129,12 +129,15 @@ func minNonzeroTime(a, b time.Time) time.Time {
 //
 // Or zero, if none of Timeout, Deadline, or context's deadline is set.
 func (d *Dialer) deadline(ctx context.Context, now time.Time) (earliest time.Time) {
+	// 查询timeout
 	if d.Timeout != 0 { // including negative, for historical reasons
 		earliest = now.Add(d.Timeout)
 	}
+	// 设置ctx的deadline
 	if d, ok := ctx.Deadline(); ok {
 		earliest = minNonzeroTime(earliest, d)
 	}
+	// 查询最小值
 	return minNonzeroTime(earliest, d.Deadline)
 }
 
@@ -389,9 +392,12 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 	if ctx == nil {
 		panic("nil context")
 	}
+	// 获取截止时间
 	deadline := d.deadline(ctx, time.Now())
+	//
 	if !deadline.IsZero() {
 		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
+			// 创建新的ctx
 			subCtx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
 			ctx = subCtx

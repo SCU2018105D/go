@@ -176,22 +176,27 @@ func (deadlineExceededError) Temporary() bool { return true }
 // struct{}, since vars of this type must have distinct addresses.
 type emptyCtx int
 
+// 执行deadline
 func (*emptyCtx) Deadline() (deadline time.Time, ok bool) {
 	return
 }
 
+// 执行相关操作
 func (*emptyCtx) Done() <-chan struct{} {
 	return nil
 }
 
+// 对应错误信息
 func (*emptyCtx) Err() error {
 	return nil
 }
 
+// 查询对应值
 func (*emptyCtx) Value(key any) any {
 	return nil
 }
 
+// 字符串
 func (e *emptyCtx) String() string {
 	switch e {
 	case background:
@@ -235,8 +240,10 @@ type CancelFunc func()
 //
 // Canceling this context releases resources associated with it, so code should
 // call cancel as soon as the operations running in this Context complete.
+// 创建一个上下文，伴随cancel函数--用于执行对应的取消函数
 func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
 	c := withCancel(parent)
+	// 返回对应的取消函数
 	return c, func() { c.cancel(true, Canceled, nil) }
 }
 
@@ -268,11 +275,14 @@ func WithCancelCause(parent Context) (ctx Context, cancel CancelCauseFunc) {
 	return c, func(cause error) { c.cancel(true, Canceled, cause) }
 }
 
+// 创建子context
 func withCancel(parent Context) *cancelCtx {
 	if parent == nil {
 		panic("cannot create context from nil parent")
 	}
+	// 创建一个子上下文--主要是连接父类指针
 	c := newCancelCtx(parent)
+	// 将父类的相关接口与子类关联创建起来
 	propagateCancel(parent, c)
 	return c
 }
@@ -302,6 +312,7 @@ var goroutines atomic.Int32
 
 // propagateCancel arranges for child to be canceled when parent is.
 func propagateCancel(parent Context, child canceler) {
+	// 检查父context是否含有done 变量
 	done := parent.Done()
 	if done == nil {
 		return // parent is never canceled
@@ -309,23 +320,29 @@ func propagateCancel(parent Context, child canceler) {
 
 	select {
 	case <-done:
-		// parent is already canceled
+		// parent is already canceled--父类进程已经正式结束
 		child.cancel(false, parent.Err(), Cause(parent))
 		return
 	default:
 	}
-
+	// 检查parent存储的值与是否已经完成(done)
 	if p, ok := parentCancelCtx(parent); ok {
+		// 父进程已经结束
+		// 进行加锁
 		p.mu.Lock()
 		if p.err != nil {
 			// parent has already been canceled
+			// 执行子进程取消函数
 			child.cancel(false, p.err, p.cause)
 		} else {
+			// 正常结束
 			if p.children == nil {
 				p.children = make(map[canceler]struct{})
 			}
+			// 将子进程添加到对应的子进程队列中
 			p.children[child] = struct{}{}
 		}
+		// 进行锁解除
 		p.mu.Unlock()
 	} else {
 		goroutines.Add(1)
@@ -353,14 +370,20 @@ func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 	if done == closedchan || done == nil {
 		return nil, false
 	}
+	// 获取其存储的值
 	p, ok := parent.Value(&cancelCtxKey).(*cancelCtx)
+	// 非对应cancelCtx直接返回错误
 	if !ok {
 		return nil, false
 	}
+	// 获取对应管道
 	pdone, _ := p.done.Load().(chan struct{})
+	// 非父context的结束信号
+	// 直接返回false
 	if pdone != done {
 		return nil, false
 	}
+	// 返回父信号存储值与父context是否结束
 	return p, true
 }
 
@@ -393,8 +416,9 @@ func init() {
 
 // A cancelCtx can be canceled. When canceled, it also cancels any children
 // that implement canceler.
+// 可取消上下文，包含父一级指针
 type cancelCtx struct {
-	Context
+	Context // context 接口继承，实现相关方法
 
 	mu       sync.Mutex            // protects following fields
 	done     atomic.Value          // of chan struct{}, created lazily, closed by first cancel call
@@ -403,6 +427,7 @@ type cancelCtx struct {
 	cause    error                 // set to non-nil by the first cancel call
 }
 
+// 进行值写入
 func (c *cancelCtx) Value(key any) any {
 	if key == &cancelCtxKey {
 		return c
@@ -410,7 +435,9 @@ func (c *cancelCtx) Value(key any) any {
 	return value(c.Context, key)
 }
 
+// 收取Done信息
 func (c *cancelCtx) Done() <-chan struct{} {
+	// 加载done值
 	d := c.done.Load()
 	if d != nil {
 		return d.(chan struct{})
@@ -418,13 +445,17 @@ func (c *cancelCtx) Done() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	d = c.done.Load()
+	// done 不存在需要进行创建
+	// 主要是创建信号进行发送
 	if d == nil {
 		d = make(chan struct{})
 		c.done.Store(d)
 	}
+	// 返回对应的信号
 	return d.(chan struct{})
 }
 
+// 获取对应error值
 func (c *cancelCtx) Err() error {
 	c.mu.Lock()
 	err := c.err

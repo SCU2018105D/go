@@ -40,7 +40,9 @@ func init() {
 func TestReverseProxy(t *testing.T) {
 	const backendResponse = "I am the backend"
 	const backendStatus = 404
+	// 创建新的http服务器
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 特定情况，直接挂起TCP连接
 		if r.Method == "GET" && r.FormValue("mode") == "hangup" {
 			c, _, _ := w.(http.Hijacker).Hijack()
 			c.Close()
@@ -70,8 +72,11 @@ func TestReverseProxy(t *testing.T) {
 		w.Header().Set("Trailers", "not a special header field name")
 		w.Header().Set("Trailer", "X-Trailer")
 		w.Header().Set("X-Foo", "bar")
+		// 进行协议提升
 		w.Header().Set("Upgrade", "foo")
+		// 进行通用的头部设计
 		w.Header().Set(fakeHopHeader, "foo")
+		// 设置多个值
 		w.Header().Add("X-Multi-Value", "foo")
 		w.Header().Add("X-Multi-Value", "bar")
 		http.SetCookie(w, &http.Cookie{Name: "flavor", Value: "chocolateChip"})

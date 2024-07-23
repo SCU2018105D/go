@@ -2,7 +2,8 @@
 # Copyright 2009 The Go Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
-
+export GOROOT_BOOTSTRAP=/home/jinfang/Github/go1.4
+export GOROOT=/home/jinfang/Github/go
 set -e
 if [ ! -f make.bash ]; then
 	echo 'all.bash must be run from $GOROOT/src' 1>&2

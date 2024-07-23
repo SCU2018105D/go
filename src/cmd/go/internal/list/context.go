@@ -9,9 +9,9 @@ import (
 )
 
 type Context struct {
-	GOARCH        string   `json:",omitempty"` // target architecture
-	GOOS          string   `json:",omitempty"` // target operating system
-	GOROOT        string   `json:",omitempty"` // Go root
+	GOARCH        string   `json:",omitempty"` // target architecture  目标cpu架构
+	GOOS          string   `json:",omitempty"` // target operating system 目标操作系统
+	GOROOT        string   `json:",omitempty"` // Go root // go root
 	GOPATH        string   `json:",omitempty"` // Go path
 	CgoEnabled    bool     `json:",omitempty"` // whether cgo can be used
 	UseAllFiles   bool     `json:",omitempty"` // use files regardless of +build lines, file names

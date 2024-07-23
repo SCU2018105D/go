@@ -1487,7 +1487,7 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 
 	c.in.Lock()
 	defer c.in.Unlock()
-
+	// 进行基础的握手操作
 	c.handshakeErr = c.handshakeFn(handshakeCtx)
 	if c.handshakeErr == nil {
 		c.handshakes++

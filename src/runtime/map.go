@@ -1149,6 +1149,7 @@ type evacDst struct {
 	e unsafe.Pointer // pointer to current elem storage
 }
 
+// map 扩容函数
 func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 	b := (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
 	newbit := h.noldbuckets()
@@ -1171,28 +1172,40 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 			y.k = add(unsafe.Pointer(y.b), dataOffset)
 			y.e = add(y.k, bucketCnt*uintptr(t.keysize))
 		}
-
+		// 遍历溢出桶进行处理
 		for ; b != nil; b = b.overflow(t) {
+			// 获取key
 			k := add(unsafe.Pointer(b), dataOffset)
+			// 获取value
 			e := add(k, bucketCnt*uintptr(t.keysize))
+			// 遍历val 数组
 			for i := 0; i < bucketCnt; i, k, e = i+1, add(k, uintptr(t.keysize)), add(e, uintptr(t.elemsize)) {
+				// 获取其高位hash值
 				top := b.tophash[i]
+				// 空元素直接跳过
 				if isEmpty(top) {
 					b.tophash[i] = evacuatedEmpty
 					continue
 				}
+				// 检查是否越界溢出
 				if top < minTopHash {
 					throw("bad map state")
 				}
+				// 获取key
 				k2 := k
+				// 检查key是否为指针
+				// 获取目标真实地址
 				if t.indirectkey() {
 					k2 = *((*unsafe.Pointer)(k2))
 				}
 				var useY uint8
+				// 需要扩容
 				if !h.sameSizeGrow() {
 					// Compute hash to make our evacuation decision (whether we need
 					// to send this key/elem to bucket x or bucket y).
+					// 计算新hash
 					hash := t.hasher(k2, uintptr(h.hash0))
+					// 检查key是否合法，是否存在hash冲突
 					if h.flags&iterator != 0 && !t.reflexivekey() && !t.key.equal(k2, k2) {
 						// If key != key (NaNs), then the hash could be (and probably
 						// will be) entirely different from the old hash. Moreover,
@@ -1205,6 +1218,7 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 						// We recompute a new random tophash for the next level so
 						// these keys will get evenly distributed across all buckets
 						// after multiple grows.
+						// 检查分配到了哪个新桶
 						useY = top & 1
 						top = tophash(hash)
 					} else {
@@ -1219,20 +1233,24 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 				}
 
 				b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY
-				dst := &xy[useY]                 // evacuation destination
-
+				// 获取目标桶
+				dst := &xy[useY] // evacuation destination
+				// 最后一个元素，设置溢出桶指向
 				if dst.i == bucketCnt {
 					dst.b = h.newoverflow(t, dst.b)
 					dst.i = 0
 					dst.k = add(unsafe.Pointer(dst.b), dataOffset)
 					dst.e = add(dst.k, bucketCnt*uintptr(t.keysize))
 				}
+				// 设置同top hash 值
 				dst.b.tophash[dst.i&(bucketCnt-1)] = top // mask dst.i as an optimization, to avoid a bounds check
 				if t.indirectkey() {
 					*(*unsafe.Pointer)(dst.k) = k2 // copy pointer
 				} else {
+					// 将key 值拷贝到新桶
 					typedmemmove(t.key, dst.k, k) // copy elem
 				}
+				// 将val 拷贝到新桶
 				if t.indirectelem() {
 					*(*unsafe.Pointer)(dst.e) = *(*unsafe.Pointer)(e)
 				} else {
@@ -1243,11 +1261,13 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 				// key or elem arrays.  That's ok, as we have the overflow pointer
 				// at the end of the bucket to protect against pointing past the
 				// end of the bucket.
+				// 重新指向数组下一个位置
 				dst.k = add(dst.k, uintptr(t.keysize))
 				dst.e = add(dst.e, uintptr(t.elemsize))
 			}
 		}
 		// Unlink the overflow buckets & clear key/elem to help GC.
+		// 取消关联溢出桶，方便进行GC回收
 		if h.flags&oldIterator == 0 && t.bucket.ptrdata != 0 {
 			b := add(h.oldbuckets, oldbucket*uintptr(t.bucketsize))
 			// Preserve b.tophash because the evacuation

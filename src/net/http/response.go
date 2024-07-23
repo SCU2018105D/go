@@ -151,6 +151,7 @@ func (r *Response) Location() (*url.URL, error) {
 // Clients must call resp.Body.Close when finished reading resp.Body.
 // After that call, clients can inspect resp.Trailer to find key/value
 // pairs included in the response trailer.
+// 执行读取请求
 func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	tp := textproto.NewReader(r)
 	resp := &Response{
@@ -158,6 +159,7 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	}
 
 	// Parse the first line of the response.
+	// 读取第一行数据
 	line, err := tp.ReadLine()
 	if err != nil {
 		if err == io.EOF {

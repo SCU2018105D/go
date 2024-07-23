@@ -4041,6 +4041,7 @@ func http2ConfigureServer(s *Server, conf *http2Server) error {
 	if s.TLSNextProto == nil {
 		s.TLSNextProto = map[string]func(*Server, *tls.Conn, Handler){}
 	}
+	// 进行连接处理
 	protoHandler := func(hs *Server, c *tls.Conn, h Handler) {
 		if http2testHookOnConn != nil {
 			http2testHookOnConn()

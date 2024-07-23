@@ -248,7 +248,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		forkReq()
 	}
 	stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
-
+	// 进行请求
 	resp, err = rt.RoundTrip(req)
 	if err != nil {
 		stopTimer()
@@ -500,9 +500,12 @@ func (c *Client) checkRedirect(req *Request, via []*Request) error {
 
 // redirectBehavior describes what should happen when the
 // client encounters a 3xx status code from the server.
+// 300 需要继续进行处理
 func redirectBehavior(reqMethod string, resp *Response, ireq *Request) (redirectMethod string, shouldRedirect, includeBody bool) {
+	// 进行状态码检查
 	switch resp.StatusCode {
 	case 301, 302, 303:
+		// 进行重定向
 		redirectMethod = reqMethod
 		shouldRedirect = true
 		includeBody = false
@@ -518,7 +521,7 @@ func redirectBehavior(reqMethod string, resp *Response, ireq *Request) (redirect
 		redirectMethod = reqMethod
 		shouldRedirect = true
 		includeBody = true
-
+		// 307,308 要求要有body
 		if ireq.GetBody == nil && ireq.outgoingLength() != 0 {
 			// We had a request body, and 307/308 require
 			// re-sending it, but GetBody is not defined. So just
@@ -584,6 +587,7 @@ func (c *Client) Do(req *Request) (*Response, error) {
 
 var testHookClientDoResult func(retres *Response, reterr error)
 
+// http 请求处理关键函数
 func (c *Client) do(req *Request) (retres *Response, reterr error) {
 	if testHookClientDoResult != nil {
 		defer func() { testHookClientDoResult(retres, reterr) }()
@@ -597,16 +601,17 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 	}
 
 	var (
-		deadline      = c.deadline()
-		reqs          []*Request
-		resp          *Response
-		copyHeaders   = c.makeHeadersCopier(req)
-		reqBodyClosed = false // have we closed the current req.Body?
+		deadline      = c.deadline()             // 定义deadline
+		reqs          []*Request                 // 定义请求列表
+		resp          *Response                  // 响应结构体指针定义
+		copyHeaders   = c.makeHeadersCopier(req) // 进行head拷贝
+		reqBodyClosed = false                    // have we closed the current req.Body?
 
 		// Redirect behavior:
-		redirectMethod string
-		includeBody    bool
+		redirectMethod string // 重定向方式
+		includeBody    bool   // 是否包含body
 	)
+	// 定义密码错误函数
 	uerr := func(err error) error {
 		// the body may have been closed already by c.send()
 		if !reqBodyClosed {
@@ -614,8 +619,10 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 		}
 		var urlStr string
 		if resp != nil && resp.Request != nil {
+			// 进行密码加密
 			urlStr = stripPassword(resp.Request.URL)
 		} else {
+			// 进行密码价目
 			urlStr = stripPassword(req.URL)
 		}
 		return &url.Error{
@@ -624,10 +631,13 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 			Err: err,
 		}
 	}
+	// 进入循环进行处理
 	for {
 		// For all but the first request, create the next
 		// request hop and replace req.
+		// 非第一个请求，需要继续进行处理，比如redirct等需要单独进行处理
 		if len(reqs) > 0 {
+			// 获取location 记录
 			loc := resp.Header.Get("Location")
 			if loc == "" {
 				// While most 3xx responses include a Location, it is not
@@ -635,6 +645,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				// observed in the wild. See issues #17773 and #49281.
 				return resp, nil
 			}
+			// 进行重新解析重定向
 			u, err := req.URL.Parse(loc)
 			if err != nil {
 				resp.closeBody()
@@ -709,10 +720,11 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				return resp, ue
 			}
 		}
-
+		// 第一个请求，加入到请求队列中
 		reqs = append(reqs, req)
 		var err error
 		var didTimeout func() bool
+		// 调用send函数进行实际的请求处理
 		if resp, didTimeout, err = c.send(req, deadline); err != nil {
 			// c.send() always closes req.Body
 			reqBodyClosed = true
@@ -726,11 +738,13 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 		}
 
 		var shouldRedirect bool
+		// 检查是否需要重定向，需要重定向的话，重新进行
 		redirectMethod, shouldRedirect, includeBody = redirectBehavior(req.Method, resp, reqs[0])
+		// 无需重定向，直接返回即可
 		if !shouldRedirect {
 			return resp, nil
 		}
-
+		// 关闭body
 		req.closeBody()
 	}
 }
@@ -1016,6 +1030,7 @@ func isDomainOrSubdomain(sub, parent string) bool {
 }
 
 func stripPassword(u *url.URL) string {
+	// 进行pass设置
 	_, passSet := u.User.Password()
 	if passSet {
 		return strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)

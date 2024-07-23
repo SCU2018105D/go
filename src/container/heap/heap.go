@@ -38,9 +38,11 @@ type Interface interface {
 // Init is idempotent with respect to the heap invariants
 // and may be called whenever the heap invariants may have been invalidated.
 // The complexity is O(n) where n = h.Len().
+// 初始化heap
 func Init(h Interface) {
 	// heapify
 	n := h.Len()
+	// 从中间开始，对每个节点进行排序
 	for i := n/2 - 1; i >= 0; i-- {
 		down(h, i, n)
 	}
@@ -81,7 +83,9 @@ func Remove(h Interface, i int) any {
 // but less expensive than, calling Remove(h, i) followed by a Push of the new value.
 // The complexity is O(log n) where n = h.Len().
 func Fix(h Interface, i int) {
+	// 没有进行变化
 	if !down(h, i, h.Len()) {
+		// 向上进行堆化
 		up(h, i)
 	}
 }
@@ -98,21 +102,30 @@ func up(h Interface, j int) {
 }
 
 func down(h Interface, i0, n int) bool {
-	i := i0
+	i := i0 // 堆顶 index
 	for {
-		j1 := 2*i + 1
+		j1 := 2*i + 1          // 左子树 index
 		if j1 >= n || j1 < 0 { // j1 < 0 after int overflow
 			break
 		}
+		// 初始化左子节点
 		j := j1 // left child
+		// j 小于堆长度&&右子节点小于左子节点
 		if j2 := j1 + 1; j2 < n && h.Less(j2, j1) {
+			// 将j更新为右子节点
 			j = j2 // = 2*i + 2  // right child
 		}
+		// 堆顶小于j，排序结束
 		if !h.Less(j, i) {
 			break
 		}
+		// 交换i,j 值--交换堆顶元素和j,保证大的在堆顶
 		h.Swap(i, j)
+		// 将i更换为j继续进行交换
 		i = j
 	}
+	// 返回 元素是否有移动
+	// 此处是一个特殊设计，用来判断向下堆化是否真的有操作
+	// 当删除中间的元素时，如果向下堆化没有操作的话，就需要再做向上堆化
 	return i > i0
 }

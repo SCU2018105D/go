@@ -959,6 +959,7 @@ var errTooLarge = errors.New("http: request too large")
 
 // Read next request from connection.
 func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
+	// TCP 连接已经被劫持，直接进行转发
 	if c.hijacked() {
 		return nil, ErrHijacked
 	}
@@ -1843,6 +1844,7 @@ func isCommonNetReadError(err error) bool {
 }
 
 // Serve a new connection.
+// 对连接进行解析
 func (c *conn) serve(ctx context.Context) {
 	c.remoteAddr = c.rwc.RemoteAddr().String()
 	ctx = context.WithValue(ctx, LocalAddrContextKey, c.rwc.LocalAddr())
@@ -1866,7 +1868,7 @@ func (c *conn) serve(ctx context.Context) {
 			c.setState(c.rwc, StateClosed, runHooks)
 		}
 	}()
-
+	// 检查是否为TLS连接
 	if tlsConn, ok := c.rwc.(*tls.Conn); ok {
 		tlsTO := c.server.tlsHandshakeTimeout()
 		if tlsTO > 0 {
@@ -1874,6 +1876,7 @@ func (c *conn) serve(ctx context.Context) {
 			c.rwc.SetReadDeadline(dl)
 			c.rwc.SetWriteDeadline(dl)
 		}
+		// tls连接握手
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			// If the handshake failed due to the client not speaking
 			// TLS, assume they're speaking plaintext HTTP and write a
@@ -1893,13 +1896,17 @@ func (c *conn) serve(ctx context.Context) {
 		}
 		c.tlsState = new(tls.ConnectionState)
 		*c.tlsState = tlsConn.ConnectionState()
+		// 获取对应的协议
 		if proto := c.tlsState.NegotiatedProtocol; validNextProto(proto) {
+			// 获取http2 处理协议
 			if fn := c.server.TLSNextProto[proto]; fn != nil {
+				// 进行基础的助理
 				h := initALPNRequest{ctx, tlsConn, serverHandler{c.server}}
 				// Mark freshly created HTTP/2 as active and prevent any server state hooks
 				// from being run on these connections. This prevents closeIdleConns from
 				// closing such connections. See issue https://golang.org/issue/39776.
 				c.setState(c.rwc, StateActive, skipHooks)
+				// 进行连接处理
 				fn(c.server, tlsConn, h)
 			}
 			return
@@ -1917,6 +1924,7 @@ func (c *conn) serve(ctx context.Context) {
 	c.bufw = newBufioWriterSize(checkConnErrorWriter{c}, 4<<10)
 
 	for {
+		// 调用函数进行数据读取
 		w, err := c.readRequest(ctx)
 		if c.r.remain != c.server.initialReadLimitSize() {
 			// If we read any bytes off the wire, we're active.
@@ -1992,6 +2000,7 @@ func (c *conn) serve(ctx context.Context) {
 		// But we're not going to implement HTTP pipelining because it
 		// was never deployed in the wild and the answer is HTTP/2.
 		inFlightResponse = w
+		// 在这里进行真正的http处理请求
 		serverHandler{c.server}.ServeHTTP(w, w.req)
 		inFlightResponse = nil
 		w.cancelCtx()
@@ -2856,7 +2865,7 @@ func (s *Server) closeListenersLocked() error {
 
 // A ConnState represents the state of a client connection to a server.
 // It's used by the optional Server.ConnState hook.
-type ConnState int
+type ConnState int // 连接状态枚举值
 
 const (
 	// StateNew represents a new connection that is expected to
@@ -3056,6 +3065,7 @@ func (srv *Server) Serve(l net.Listener) error {
 
 	ctx := context.WithValue(baseCtx, ServerContextKey, srv)
 	for {
+		// 获取TCP连接
 		rw, err := l.Accept()
 		if err != nil {
 			if srv.shuttingDown() {
@@ -3084,7 +3094,9 @@ func (srv *Server) Serve(l net.Listener) error {
 			}
 		}
 		tempDelay = 0
+		// 创建新的连接
 		c := srv.newConn(rw)
+		// 进行处理
 		c.setState(c.rwc, StateNew, runHooks) // before Serve can return
 		go c.serve(connCtx)
 	}

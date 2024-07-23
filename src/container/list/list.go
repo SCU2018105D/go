@@ -18,7 +18,7 @@ type Element struct {
 	// as a ring, such that &l.root is both the next element of the last
 	// list element (l.Back()) and the previous element of the first list
 	// element (l.Front()).
-	next, prev *Element
+	next, prev *Element // 向前向后元素
 
 	// The list to which this element belongs.
 	list *List
