@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !js && !plan9 && !windows
+//go:build !plan9
 
 package net
 
@@ -20,6 +20,10 @@ import (
 func TestReadUnixgramWithUnnamedSocket(t *testing.T) {
 	if !testableNetwork("unixgram") {
 		t.Skip("unixgram test")
+	}
+	switch runtime.GOOS {
+	case "js", "wasip1":
+		t.Skipf("skipping: syscall.Socket not implemented on %s", runtime.GOOS)
 	}
 	if runtime.GOOS == "openbsd" {
 		testenv.SkipFlaky(t, 15157)
@@ -278,7 +282,7 @@ func TestUnixConnLocalAndRemoteNames(t *testing.T) {
 		}
 
 		switch runtime.GOOS {
-		case "android", "linux":
+		case "android", "linux", "windows":
 			if laddr == "" {
 				laddr = "@" // autobind feature
 			}
@@ -359,6 +363,11 @@ func TestUnixUnlink(t *testing.T) {
 	if !testableNetwork("unix") {
 		t.Skip("unix test")
 	}
+	switch runtime.GOOS {
+	case "js", "wasip1":
+		t.Skipf("skipping: %s does not support Unlink", runtime.GOOS)
+	}
+
 	name := testUnixAddr(t)
 
 	listen := func(t *testing.T) *UnixListener {
@@ -389,6 +398,9 @@ func TestUnixUnlink(t *testing.T) {
 
 	// FileListener should not.
 	t.Run("FileListener", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("skipping: FileListener not implemented on windows")
+		}
 		l := listen(t)
 		f, _ := l.File()
 		l1, _ := FileListener(f)
@@ -436,6 +448,9 @@ func TestUnixUnlink(t *testing.T) {
 	})
 
 	t.Run("FileListener/SetUnlinkOnClose(true)", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("skipping: FileListener not implemented on windows")
+		}
 		l := listen(t)
 		f, _ := l.File()
 		l1, _ := FileListener(f)
@@ -449,6 +464,9 @@ func TestUnixUnlink(t *testing.T) {
 	})
 
 	t.Run("FileListener/SetUnlinkOnClose(false)", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("skipping: FileListener not implemented on windows")
+		}
 		l := listen(t)
 		f, _ := l.File()
 		l1, _ := FileListener(f)

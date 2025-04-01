@@ -1,5 +1,7 @@
 # Go internal ABI specification
 
+Self-link: [go.dev/s/regabi](https://go.dev/s/regabi)
+
 This document describes Go’s internal application binary interface
 (ABI), known as ABIInternal.
 Go's ABI defines the layout of data in memory and the conventions for
@@ -30,19 +32,19 @@ specification](/doc/go_spec.html#Size_and_alignment_guarantees).
 Those that aren't guaranteed may change in future versions of Go (for
 example, we've considered changing the alignment of int64 on 32-bit).
 
-| Type | 64-bit |       | 32-bit |       |
-| ---  | ---    | ---   | ---    | ---   |
-|      | Size   | Align | Size   | Align |
-| bool, uint8, int8  | 1  | 1 | 1  | 1 |
-| uint16, int16      | 2  | 2 | 2  | 2 |
-| uint32, int32      | 4  | 4 | 4  | 4 |
-| uint64, int64      | 8  | 8 | 8  | 4 |
-| int, uint          | 8  | 8 | 4  | 4 |
-| float32            | 4  | 4 | 4  | 4 |
-| float64            | 8  | 8 | 8  | 4 |
-| complex64          | 8  | 4 | 8  | 4 |
-| complex128         | 16 | 8 | 16 | 4 |
-| uintptr, *T, unsafe.Pointer | 8 | 8 | 4 | 4 |
+| Type                        | 64-bit |       | 32-bit |       |
+|-----------------------------|--------|-------|--------|-------|
+|                             | Size   | Align | Size   | Align |
+| bool, uint8, int8           | 1      | 1     | 1      | 1     |
+| uint16, int16               | 2      | 2     | 2      | 2     |
+| uint32, int32               | 4      | 4     | 4      | 4     |
+| uint64, int64               | 8      | 8     | 8      | 4     |
+| int, uint                   | 8      | 8     | 4      | 4     |
+| float32                     | 4      | 4     | 4      | 4     |
+| float64                     | 8      | 8     | 8      | 4     |
+| complex64                   | 8      | 4     | 8      | 4     |
+| complex128                  | 16     | 8     | 16     | 4     |
+| uintptr, *T, unsafe.Pointer | 8      | 8     | 4      | 4     |
 
 The types `byte` and `rune` are aliases for `uint8` and `int32`,
 respectively, and hence have the same size and alignment as these
@@ -134,7 +136,7 @@ assigned to registers or the stack using the following algorithm:
 1. Let NI and NFP be the length of integer and floating-point register
    sequences defined by the architecture.
    Let I and FP be 0; these are the indexes of the next integer and
-   floating-pointer register.
+   floating-point register.
    Let S, the type sequence defining the stack frame, be empty.
 1. If F is a method, assign F’s receiver.
 1. For each argument A of F, assign A.
@@ -630,6 +632,56 @@ functions to use floating-point and vector (SIMD) operations without
 modifying or saving the FPCR.
 Functions are allowed to modify it between calls (as long as they
 restore it), but as of this writing Go code never does.
+
+### loong64 architecture
+
+The loong64 architecture uses R4 – R19 for integer arguments and integer results.
+
+It uses F0 – F15 for floating-point arguments and results.
+
+Registers R20 - R21, R23 – R28, R30 - R31, F16 – F31 are permanent scratch registers.
+
+Register R2 is reserved and never used.
+
+Register R20, R21 is Used by runtime.duffcopy, runtime.duffzero.
+
+Special-purpose registers used within Go generated code and Go assembly code
+are as follows:
+
+| Register | Call meaning | Return meaning | Body meaning |
+| --- | --- | --- | --- |
+| R0 | Zero value | Same | Same |
+| R1 | Link register | Link register | Scratch |
+| R3 | Stack pointer | Same | Same |
+| R20,R21 | Scratch | Scratch | Used by duffcopy, duffzero |
+| R22 | Current goroutine | Same | Same |
+| R29 | Closure context pointer | Same | Same |
+| R30, R31 | used by the assembler | Same | Same |
+
+*Rationale*: These register meanings are compatible with Go’s stack-based
+calling convention.
+
+#### Stack layout
+
+The stack pointer, R3, grows down and is aligned to 8 bytes.
+
+A function's stack frame, after the frame is created, is laid out as
+follows:
+
+    +------------------------------+
+    | ... locals ...               |
+    | ... outgoing arguments ...   |
+    | return PC                    | ← R3 points to
+    +------------------------------+ ↓ lower addresses
+
+This stack layout is used by both register-based (ABIInternal) and
+stack-based (ABI0) calling conventions.
+
+The "return PC" is loaded to the link register, R1, as part of the
+loong64 `JAL` operation.
+
+#### Flags
+All bits in CSR are system flags and are not modified by Go.
 
 ### ppc64 architecture
 

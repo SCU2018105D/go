@@ -4,7 +4,10 @@
 
 package types2
 
-import "cmd/compile/internal/syntax"
+import (
+	"cmd/compile/internal/syntax"
+	. "internal/types/errors"
+)
 
 // ----------------------------------------------------------------------------
 // API
@@ -12,7 +15,6 @@ import "cmd/compile/internal/syntax"
 // An Interface represents an interface type.
 type Interface struct {
 	check     *Checker      // for error reporting; nil once type set is computed
-	obj       *TypeName     // corresponding declared object; or nil (for better error messages)
 	methods   []*Func       // ordered list of explicitly declared methods
 	embeddeds []Type        // ordered list of explicitly embedded elements
 	embedPos  *[]syntax.Pos // positions of embedded elements; or nil (for error messages) - use pointer to save space
@@ -40,7 +42,7 @@ func NewInterfaceType(methods []*Func, embeddeds []Type) *Interface {
 	typ := (*Checker)(nil).newInterface()
 	for _, m := range methods {
 		if sig := m.typ.(*Signature); sig.recv == nil {
-			sig.recv = NewVar(m.pos, m.pkg, "", typ)
+			sig.recv = newVar(RecvVar, m.pos, m.pkg, "", typ)
 		}
 	}
 
@@ -110,11 +112,12 @@ func (t *Interface) String() string   { return TypeString(t, nil) }
 // Implementation
 
 func (t *Interface) cleanup() {
+	t.typeSet() // any interface that escapes type checking must be safe for concurrent use
 	t.check = nil
 	t.embedPos = nil
 }
 
-func (check *Checker) interfaceType(ityp *Interface, iface *syntax.InterfaceType, def *Named) {
+func (check *Checker) interfaceType(ityp *Interface, iface *syntax.InterfaceType, def *TypeName) {
 	addEmbedded := func(pos syntax.Pos, typ Type) {
 		ityp.embeddeds = append(ityp.embeddeds, typ)
 		if ityp.embedPos == nil {
@@ -125,7 +128,7 @@ func (check *Checker) interfaceType(ityp *Interface, iface *syntax.InterfaceType
 
 	for _, f := range iface.MethodList {
 		if f.Name == nil {
-			addEmbedded(posFor(f.Type), parseUnion(check, f.Type))
+			addEmbedded(atPos(f.Type), parseUnion(check, f.Type))
 			continue
 		}
 		// f.Name != nil
@@ -133,29 +136,29 @@ func (check *Checker) interfaceType(ityp *Interface, iface *syntax.InterfaceType
 		// We have a method with name f.Name.
 		name := f.Name.Value
 		if name == "_" {
-			if check.conf.CompilerErrorMessages {
-				check.error(f.Name, "methods must have a unique non-blank name")
-			} else {
-				check.error(f.Name, "invalid method name _")
-			}
-			continue // ignore
+			check.error(f.Name, BlankIfaceMethod, "methods must have a unique non-blank name")
+			continue // ignore method
 		}
 
-		typ := check.typ(f.Type)
-		sig, _ := typ.(*Signature)
-		if sig == nil {
-			if typ != Typ[Invalid] {
-				check.errorf(f.Type, invalidAST+"%s is not a method signature", typ)
-			}
-			continue // ignore
+		// Type-check method declaration.
+		// Note: Don't call check.typ(f.Type) as that would record
+		// the method incorrectly as a type expression in Info.Types.
+		ftyp, _ := f.Type.(*syntax.FuncType)
+		if ftyp == nil {
+			check.errorf(f.Type, InvalidSyntaxTree, "%s is not a method signature", f.Type)
+			continue // ignore method
 		}
+		sig := new(Signature)
+		check.funcType(sig, nil, nil, ftyp)
 
 		// use named receiver type if available (for better error messages)
 		var recvTyp Type = ityp
 		if def != nil {
-			recvTyp = def
+			if named := asNamed(def.typ); named != nil {
+				recvTyp = named
+			}
 		}
-		sig.recv = NewVar(f.Name.Pos(), check.pkg, "", recvTyp)
+		sig.recv = newVar(RecvVar, f.Name.Pos(), check.pkg, "", recvTyp)
 
 		m := NewFunc(f.Name.Pos(), check.pkg, name, sig)
 		check.recordDef(f.Name, m)

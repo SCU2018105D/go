@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+//go:build unix
 
 package syscall_test
 
@@ -99,7 +99,7 @@ func TestFcntlFlock(t *testing.T) {
 			t.Fatalf("FcntlFlock(F_SETLK) failed: %v", err)
 		}
 
-		cmd := exec.Command(os.Args[0], "-test.run=^TestFcntlFlock$")
+		cmd := exec.Command(testenv.Executable(t), "-test.run=^TestFcntlFlock$")
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 		cmd.ExtraFiles = []*os.File{f}
 		out, err := cmd.CombinedOutput()
@@ -171,7 +171,7 @@ func TestPassFD(t *testing.T) {
 	defer writeFile.Close()
 	defer readFile.Close()
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPassFD$", "--", tempDir)
+	cmd := exec.Command(testenv.Executable(t), "-test.run=^TestPassFD$", "--", tempDir)
 	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 	cmd.ExtraFiles = []*os.File{writeFile}
 

@@ -6,11 +6,11 @@ package ssa
 
 import (
 	"cmd/compile/internal/abi"
+	"cmd/compile/internal/base"
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
 	"cmd/internal/src"
-	"internal/buildcfg"
 )
 
 // A Config holds readonly compilation information.
@@ -21,8 +21,10 @@ type Config struct {
 	PtrSize        int64  // 4 or 8; copy of cmd/internal/sys.Arch.PtrSize
 	RegSize        int64  // 4 or 8; copy of cmd/internal/sys.Arch.RegSize
 	Types          Types
-	lowerBlock     blockRewriter  // lowering function
-	lowerValue     valueRewriter  // lowering function
+	lowerBlock     blockRewriter  // block lowering function, first round
+	lowerValue     valueRewriter  // value lowering function, first round
+	lateLowerBlock blockRewriter  // block lowering function that needs to be run after the first round; only used on some architectures
+	lateLowerValue valueRewriter  // value lowering function that needs to be run after the first round; only used on some architectures
 	splitLoad      valueRewriter  // function for splitting merged load ops; only used on some architectures
 	registers      []Register     // machine registers
 	gpRegMask      regMask        // general purpose integer register mask
@@ -34,20 +36,20 @@ type Config struct {
 	floatParamRegs []int8         // register numbers of floating param (in/out) registers
 	ABI1           *abi.ABIConfig // "ABIInternal" under development // TODO change comment when this becomes current
 	ABI0           *abi.ABIConfig
-	GCRegMap       []*Register // garbage collector register map, by GC register index
-	FPReg          int8        // register number of frame pointer, -1 if not used
-	LinkReg        int8        // register number of link register if it is a general purpose register, -1 if not used
-	hasGReg        bool        // has hardware g register
-	ctxt           *obj.Link   // Generic arch information
-	optimize       bool        // Do optimization
-	noDuffDevice   bool        // Don't use Duff's device
-	useSSE         bool        // Use SSE for non-float operations
-	useAvg         bool        // Use optimizations that need Avg* operations
-	useHmul        bool        // Use optimizations that need Hmul* operations
-	SoftFloat      bool        //
-	Race           bool        // race detector enabled
-	BigEndian      bool        //
-	UseFMA         bool        // Use hardware FMA operation
+	FPReg          int8      // register number of frame pointer, -1 if not used
+	LinkReg        int8      // register number of link register if it is a general purpose register, -1 if not used
+	hasGReg        bool      // has hardware g register
+	ctxt           *obj.Link // Generic arch information
+	optimize       bool      // Do optimization
+	useAvg         bool      // Use optimizations that need Avg* operations
+	useHmul        bool      // Use optimizations that need Hmul* operations
+	SoftFloat      bool      //
+	Race           bool      // race detector enabled
+	BigEndian      bool      //
+	unalignedOK    bool      // Unaligned loads/stores are ok
+	haveBswap64    bool      // architecture implements Bswap64
+	haveBswap32    bool      // architecture implements Bswap32
+	haveBswap16    bool      // architecture implements Bswap16
 }
 
 type (
@@ -123,7 +125,7 @@ type Logger interface {
 	// some logging calls account for more than a few heap allocations.
 	Log() bool
 
-	// Fatal reports a compiler error and exits.
+	// Fatalf reports a compiler error and exits.
 	Fatalf(pos src.XPos, msg string, args ...interface{})
 
 	// Warnl writes compiler messages in the form expected by "errorcheck" tests
@@ -134,26 +136,14 @@ type Logger interface {
 }
 
 type Frontend interface {
-	CanSSA(t *types.Type) bool
-
 	Logger
 
 	// StringData returns a symbol pointing to the given string's contents.
 	StringData(string) *obj.LSym
 
-	// Auto returns a Node for an auto variable of the given type.
-	// The SSA compiler uses this function to allocate space for spills.
-	Auto(src.XPos, *types.Type) *ir.Name
-
 	// Given the name for a compound type, returns the name we should use
 	// for the parts of that compound type.
 	SplitSlot(parent *LocalSlot, suffix string, offset int64, t *types.Type) LocalSlot
-
-	// Line returns a string describing the given position.
-	Line(src.XPos) string
-
-	// AllocFrame assigns frame offsets to all live auto variables.
-	AllocFrame(f *Func)
 
 	// Syslook returns a symbol of the runtime function/variable with the
 	// given name.
@@ -162,12 +152,8 @@ type Frontend interface {
 	// UseWriteBarrier reports whether write barrier is enabled
 	UseWriteBarrier() bool
 
-	// SetWBPos indicates that a write barrier has been inserted
-	// in this function at position pos.
-	SetWBPos(pos src.XPos)
-
-	// MyImportPath provides the import name (roughly, the package) for the function being compiled.
-	MyImportPath() string
+	// Func returns the ir.Func of the function being compiled.
+	Func() *ir.Func
 }
 
 // NewConfig returns a new configuration object for the given architecture.
@@ -181,6 +167,8 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.RegSize = 8
 		c.lowerBlock = rewriteBlockAMD64
 		c.lowerValue = rewriteValueAMD64
+		c.lateLowerBlock = rewriteBlockAMD64latelower
+		c.lateLowerValue = rewriteValueAMD64latelower
 		c.splitLoad = rewriteValueAMD64splitload
 		c.registers = registersAMD64[:]
 		c.gpRegMask = gpRegMaskAMD64
@@ -191,6 +179,10 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegAMD64
 		c.LinkReg = linkRegAMD64
 		c.hasGReg = true
+		c.unalignedOK = true
+		c.haveBswap64 = true
+		c.haveBswap32 = true
+		c.haveBswap16 = true
 	case "386":
 		c.PtrSize = 4
 		c.RegSize = 4
@@ -203,6 +195,9 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerReg386
 		c.LinkReg = linkReg386
 		c.hasGReg = false
+		c.unalignedOK = true
+		c.haveBswap32 = true
+		c.haveBswap16 = true
 	case "arm":
 		c.PtrSize = 4
 		c.RegSize = 4
@@ -219,6 +214,8 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.RegSize = 8
 		c.lowerBlock = rewriteBlockARM64
 		c.lowerValue = rewriteValueARM64
+		c.lateLowerBlock = rewriteBlockARM64latelower
+		c.lateLowerValue = rewriteValueARM64latelower
 		c.registers = registersARM64[:]
 		c.gpRegMask = gpRegMaskARM64
 		c.fpRegMask = fpRegMaskARM64
@@ -227,7 +224,10 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegARM64
 		c.LinkReg = linkRegARM64
 		c.hasGReg = true
-		c.noDuffDevice = buildcfg.GOOS == "darwin" || buildcfg.GOOS == "ios" // darwin linker cannot handle BR26 reloc with non-zero addend
+		c.unalignedOK = true
+		c.haveBswap64 = true
+		c.haveBswap32 = true
+		c.haveBswap16 = true
 	case "ppc64":
 		c.BigEndian = true
 		fallthrough
@@ -236,14 +236,25 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.RegSize = 8
 		c.lowerBlock = rewriteBlockPPC64
 		c.lowerValue = rewriteValuePPC64
+		c.lateLowerBlock = rewriteBlockPPC64latelower
+		c.lateLowerValue = rewriteValuePPC64latelower
 		c.registers = registersPPC64[:]
 		c.gpRegMask = gpRegMaskPPC64
 		c.fpRegMask = fpRegMaskPPC64
+		c.specialRegMask = specialRegMaskPPC64
 		c.intParamRegs = paramIntRegPPC64
 		c.floatParamRegs = paramFloatRegPPC64
 		c.FPReg = framepointerRegPPC64
 		c.LinkReg = linkRegPPC64
 		c.hasGReg = true
+		c.unalignedOK = true
+		// Note: ppc64 has register bswap ops only when GOPPC64>=10.
+		// But it has bswap+load and bswap+store ops for all ppc64 variants.
+		// That is the sense we're using them here - they are only used
+		// in contexts where they can be merged with a load or store.
+		c.haveBswap64 = true
+		c.haveBswap32 = true
+		c.haveBswap16 = true
 	case "mips64":
 		c.BigEndian = true
 		fallthrough
@@ -259,6 +270,19 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegMIPS64
 		c.LinkReg = linkRegMIPS64
 		c.hasGReg = true
+	case "loong64":
+		c.PtrSize = 8
+		c.RegSize = 8
+		c.lowerBlock = rewriteBlockLOONG64
+		c.lowerValue = rewriteValueLOONG64
+		c.registers = registersLOONG64[:]
+		c.gpRegMask = gpRegMaskLOONG64
+		c.fpRegMask = fpRegMaskLOONG64
+		c.intParamRegs = paramIntRegLOONG64
+		c.floatParamRegs = paramFloatRegLOONG64
+		c.FPReg = framepointerRegLOONG64
+		c.LinkReg = linkRegLOONG64
+		c.hasGReg = true
 	case "s390x":
 		c.PtrSize = 8
 		c.RegSize = 8
@@ -270,8 +294,11 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegS390X
 		c.LinkReg = linkRegS390X
 		c.hasGReg = true
-		c.noDuffDevice = true
 		c.BigEndian = true
+		c.unalignedOK = true
+		c.haveBswap64 = true
+		c.haveBswap32 = true
+		c.haveBswap16 = true // only for loads&stores, see ppc64 comment
 	case "mips":
 		c.BigEndian = true
 		fallthrough
@@ -287,15 +314,18 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegMIPS
 		c.LinkReg = linkRegMIPS
 		c.hasGReg = true
-		c.noDuffDevice = true
 	case "riscv64":
 		c.PtrSize = 8
 		c.RegSize = 8
 		c.lowerBlock = rewriteBlockRISCV64
 		c.lowerValue = rewriteValueRISCV64
+		c.lateLowerBlock = rewriteBlockRISCV64latelower
+		c.lateLowerValue = rewriteValueRISCV64latelower
 		c.registers = registersRISCV64[:]
 		c.gpRegMask = gpRegMaskRISCV64
 		c.fpRegMask = fpRegMaskRISCV64
+		c.intParamRegs = paramIntRegRISCV64
+		c.floatParamRegs = paramFloatRegRISCV64
 		c.FPReg = framepointerRegRISCV64
 		c.hasGReg = true
 	case "wasm":
@@ -311,7 +341,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		c.FPReg = framepointerRegWasm
 		c.LinkReg = linkRegWasm
 		c.hasGReg = true
-		c.noDuffDevice = true
 		c.useAvg = false
 		c.useHmul = false
 	default:
@@ -319,27 +348,13 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 	}
 	c.ctxt = ctxt
 	c.optimize = optimize
-	c.useSSE = true
-	c.UseFMA = true
 	c.SoftFloat = softfloat
 	if softfloat {
 		c.floatParamRegs = nil // no FP registers in softfloat mode
 	}
 
-	c.ABI0 = abi.NewABIConfig(0, 0, ctxt.FixedFrameSize())
-	c.ABI1 = abi.NewABIConfig(len(c.intParamRegs), len(c.floatParamRegs), ctxt.FixedFrameSize())
-
-	// On Plan 9, floating point operations are not allowed in note handler.
-	if buildcfg.GOOS == "plan9" {
-		// Don't use FMA on Plan 9
-		c.UseFMA = false
-
-		// Don't use Duff's device and SSE on Plan 9 AMD64.
-		if arch == "amd64" {
-			c.noDuffDevice = true
-			c.useSSE = false
-		}
-	}
+	c.ABI0 = abi.NewABIConfig(0, 0, ctxt.Arch.FixedFrameSize, 0)
+	c.ABI1 = abi.NewABIConfig(len(c.intParamRegs), len(c.floatParamRegs), ctxt.Arch.FixedFrameSize, 1)
 
 	if ctxt.Flag_shared {
 		// LoweredWB is secretly a CALL and CALLs on 386 in
@@ -348,22 +363,21 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize, softfloat boo
 		opcodeTable[Op386LoweredWB].reg.clobbers |= 1 << 3 // BX
 	}
 
-	// Create the GC register map index.
-	// TODO: This is only used for debug printing. Maybe export config.registers?
-	gcRegMapSize := int16(0)
-	for _, r := range c.registers {
-		if r.gcNum+1 > gcRegMapSize {
-			gcRegMapSize = r.gcNum + 1
-		}
-	}
-	c.GCRegMap = make([]*Register, gcRegMapSize)
-	for i, r := range c.registers {
-		if r.gcNum != -1 {
-			c.GCRegMap[r.gcNum] = &c.registers[i]
-		}
-	}
-
 	return c
 }
 
 func (c *Config) Ctxt() *obj.Link { return c.ctxt }
+
+func (c *Config) haveByteSwap(size int64) bool {
+	switch size {
+	case 8:
+		return c.haveBswap64
+	case 4:
+		return c.haveBswap32
+	case 2:
+		return c.haveBswap16
+	default:
+		base.Fatalf("bad size %d\n", size)
+		return false
+	}
+}
